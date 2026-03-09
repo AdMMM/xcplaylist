@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>XCPlaylist - IPTV Player</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+  <!-- Login Screen -->
+  <div id="login-screen" class="screen active">
+    <div class="login-card">
+      <h1>XCPlaylist</h1>
+      <p class="subtitle">Ad-Free IPTV Player</p>
+      <form id="login-form">
+        <input type="url" id="server-url" placeholder="Server URL (e.g. http://example.com:8080)" required autocomplete="url">
+        <input type="text" id="username" placeholder="Username" required autocomplete="username">
+        <input type="password" id="password" placeholder="Password" required autocomplete="current-password">
+        <button type="submit" id="login-btn">Connect</button>
+        <div id="login-error" class="error hidden"></div>
+        <label class="remember"><input type="checkbox" id="remember-me" checked> Remember credentials</label>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main App -->
+  <div id="app-screen" class="screen">
+    <!-- Top bar -->
+    <header id="topbar">
+      <div class="topbar-left">
+        <button id="sidebar-toggle" class="icon-btn" title="Toggle sidebar">&#9776;</button>
+        <h2 class="logo">XCPlaylist</h2>
+      </div>
+      <div class="topbar-center">
+        <input type="search" id="search-input" placeholder="Search channels, movies, series...">
+      </div>
+      <div class="topbar-right">
+        <button id="nav-live" class="nav-btn active" data-section="live">Live TV</button>
+        <button id="nav-vod" class="nav-btn" data-section="vod">Movies</button>
+        <button id="nav-series" class="nav-btn" data-section="series">Series</button>
+        <button id="nav-favorites" class="nav-btn" data-section="favorites">&#9733;</button>
+        <button id="nav-history" class="nav-btn" data-section="history">History</button>
+        <button id="logout-btn" class="icon-btn" title="Logout">&#x23FB;</button>
+      </div>
+    </header>
+
+    <div id="main-layout">
+      <!-- Sidebar (categories) -->
+      <aside id="sidebar">
+        <div id="category-list"></div>
+      </aside>
+
+      <!-- Content area -->
+      <main id="content">
+        <!-- Continue Watching row -->
+        <div id="continue-watching" class="hidden">
+          <h3 class="cw-heading">Continue Watching</h3>
+          <div id="continue-list"></div>
+        </div>
+
+        <!-- Channel / VOD grid -->
+        <div id="channel-grid" class="grid"></div>
+
+        <!-- Loading indicator -->
+        <div id="loading" class="hidden">
+          <div class="spinner"></div>
+        </div>
+      </main>
+    </div>
+
+    <!-- Player Overlay -->
+    <div id="player-overlay" class="hidden">
+      <div id="player-header">
+        <span id="player-title"></span>
+        <button id="player-fav" class="icon-btn" title="Add to favorites">&#9734;</button>
+        <button id="player-close" class="icon-btn">&times;</button>
+      </div>
+      <div id="player-container">
+        <video id="video-player" playsinline></video>
+        <div class="buffering-overlay"><div class="spinner"></div></div>
+        <div id="quality-indicator" class="hidden"><span id="quality-dot"></span><span id="quality-text"></span></div>
+        <div id="channel-zap" class="hidden"><span id="zap-channel"></span></div>
+        <div id="format-overlay" class="hidden"><span id="format-text"></span></div>
+        <div id="player-controls">
+          <button id="ctrl-play" class="ctrl-btn">&#9654;</button>
+          <div id="progress-bar" class="hidden">
+            <div id="progress-fill"></div>
+          </div>
+          <span id="time-display"></span>
+          <button id="ctrl-mute" class="ctrl-btn">&#128264;</button>
+          <input type="range" id="volume-slider" min="0" max="1" step="0.05" value="1">
+          <button id="ctrl-format" class="ctrl-btn format-btn" title="Switch stream format (try if audio/video isn't working)"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l1.88 1.88M14.12 3.88L16 2M9 7.13v-1a3.003 3.003 0 116 0v1"/><path d="M12 20c-3.3 0-6-2.7-6-6v-3a4 4 0 014-4h4a4 4 0 014 4v3c0 3.3-2.7 6-6 6z"/><path d="M12 20v2M6 13H2M22 13h-4M6 17l-2 1M18 17l2 1"/></svg></button>
+          <button id="ctrl-pip" class="ctrl-btn" title="Picture in Picture"><svg width="16" height="16" viewBox="0 0 20 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="18" height="14" rx="2"/><rect x="10" y="7" width="7" height="6" rx="1" fill="currentColor" stroke="none"/></svg></button>
+          <button id="ctrl-fullscreen" class="ctrl-btn">&#x26F6;</button>
+        </div>
+      </div>
+      <!-- EPG Panel -->
+      <div id="epg-panel" class="hidden">
+        <h3>Programme Guide</h3>
+        <div id="epg-list"></div>
+      </div>
+    </div>
+
+    <!-- Reminder Toast -->
+    <div id="reminder-toast" class="hidden">
+      <span id="toast-text"></span>
+      <button id="toast-watch" class="toast-btn">Watch Now</button>
+      <button id="toast-close" class="toast-btn toast-dismiss">&times;</button>
+    </div>
+
+    <!-- Series Detail Overlay -->
+    <div id="series-overlay" class="hidden">
+      <div id="series-header">
+        <button id="series-close" class="icon-btn">&times;</button>
+        <span id="series-title"></span>
+      </div>
+      <div id="series-content">
+        <div id="series-info"></div>
+        <div id="season-tabs"></div>
+        <div id="episode-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- HLS.js (open source, BSD license) - for H.264 HLS streams -->
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
+  <!-- mpegts.js (open source, Apache-2.0) - for HEVC/H.265 MPEG-TS streams -->
+  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+  <script src="/js/api.js"></script>
+  <script src="/js/player.js"></script>
+  <script src="/js/epg.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>

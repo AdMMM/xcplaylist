@@ -1,0 +1,77 @@
+{
+  "name": "xcplaylist",
+  "version": "1.0.0",
+  "description": "Lightning-fast ad-free IPTV player with Xtream Codes support",
+  "main": "electron.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "electron": "electron .",
+    "ffmpeg:download": "node scripts/download-ffmpeg.js all",
+    "dist:mac": "node scripts/download-ffmpeg.js mac && electron-builder --mac",
+    "dist:win": "node scripts/download-ffmpeg.js win && electron-builder --win",
+    "dist:all": "node scripts/download-ffmpeg.js all && electron-builder --mac --win"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "fast-xml-parser": "^4.5.0",
+    "ffmpeg-static": "^5.3.0"
+  },
+  "devDependencies": {
+    "electron": "^40.8.0",
+    "electron-builder": "^26.8.1"
+  },
+  "build": {
+    "appId": "com.xcplaylist.app",
+    "productName": "XCPlaylist",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "electron.js",
+      "server.js",
+      "public/**/*",
+      "package.json",
+      "node_modules/**/*"
+    ],
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
+    "mac": {
+      "category": "public.app-category.entertainment",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": ["arm64"]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "build/ffmpeg-mac/ffmpeg",
+          "to": "bin/ffmpeg"
+        }
+      ]
+    },
+    "dmg": {
+      "title": "XCPlaylist"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "extraResources": [
+        {
+          "from": "build/ffmpeg-win/ffmpeg.exe",
+          "to": "bin/ffmpeg.exe"
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}
