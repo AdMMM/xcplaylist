@@ -80,6 +80,7 @@ const Player = (() => {
   function destroy() {
     clearTimeout(bufferingTimer);
     stalledRetries = 0;
+    pausedAt = 0;
     video.classList.remove('buffering');
     if (mpegtsPlayer) {
       mpegtsPlayer.pause();
@@ -213,9 +214,58 @@ const Player = (() => {
     }
   }
 
+  let pausedAt = 0; // timestamp when pause was pressed (live streams only)
+
   function togglePlay() {
-    if (video.paused) video.play().catch(() => {});
-    else video.pause();
+    if (video.paused) {
+      // ── Unpause ──
+      if (isLive && pausedAt) {
+        const pausedFor = (Date.now() - pausedAt) / 1000;
+        pausedAt = 0;
+
+        // If paused for more than 3s on a live stream, jump to live edge
+        if (pausedFor > 3) {
+          console.log(`[player] Live stream was paused for ${pausedFor.toFixed(0)}s — jumping to live edge`);
+          seekToLiveEdge();
+          return;
+        }
+      }
+      video.play().catch(() => {});
+    } else {
+      // ── Pause ──
+      if (isLive) {
+        pausedAt = Date.now();
+        // Stop fetching to save bandwidth while paused
+        if (hls) hls.stopLoad();
+        if (mpegtsPlayer) mpegtsPlayer.pause(); // pauses network fetching
+      }
+      video.pause();
+    }
+  }
+
+  function seekToLiveEdge() {
+    if (hls) {
+      // Restart HLS loading — it will fetch the latest live segments
+      hls.startLoad(-1);
+      // Jump to the live sync position once available
+      if (typeof hls.liveSyncPosition === 'number' && hls.liveSyncPosition > 0) {
+        video.currentTime = hls.liveSyncPosition;
+      } else if (video.buffered.length > 0) {
+        video.currentTime = video.buffered.end(video.buffered.length - 1);
+      }
+      video.play().catch(() => {});
+    } else if (mpegtsPlayer) {
+      // Reconnect the MPEG-TS stream from the current live point
+      mpegtsPlayer.unload();
+      mpegtsPlayer.load();
+      startPlay();
+    } else {
+      // Native HLS (Safari) or direct — seek to end of buffer
+      if (video.buffered.length > 0) {
+        video.currentTime = video.buffered.end(video.buffered.length - 1);
+      }
+      video.play().catch(() => {});
+    }
   }
 
   function setVolume(v) { video.volume = v; }
@@ -318,7 +368,7 @@ const Player = (() => {
     init, play, destroy, togglePlay, setVolume, toggleMute,
     isPlaying, isMuted, duration, currentTime, seek,
     toggleFullscreen, togglePiP, getQualityStats, onError,
-    getAudioHealth, resetAudioCheck,
+    getAudioHealth, resetAudioCheck, seekToLiveEdge,
     get isLive() { return isLive; },
     get video() { return video; },
   };

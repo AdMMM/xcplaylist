@@ -415,6 +415,7 @@ app.get('/api/transcode', (req, res) => {
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true, // Prevent cmd.exe flash on Windows
   });
+  activeTranscodes.add(ff);
 
   let ffStarted = false;
 
@@ -442,6 +443,7 @@ app.get('/api/transcode', (req, res) => {
   });
 
   ff.on('close', (code) => {
+    activeTranscodes.delete(ff);
     console.log(`[transcode] FFmpeg exited (code ${code}) for ${shortPath}`);
     if (!res.headersSent && code !== 0) {
       res.status(502).json({ error: `FFmpeg exited with code ${code}` });
@@ -474,6 +476,30 @@ app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
+// Track active FFmpeg processes so we can kill them on shutdown
+const activeTranscodes = new Set();
+
+const server = app.listen(PORT, () => {
   console.log(`XCPlaylist running at http://localhost:${PORT}`);
 });
+
+// Graceful shutdown — called from electron.js before-quit
+function shutdown() {
+  console.log('[server] Shutting down...');
+  // Kill all active FFmpeg processes
+  for (const ff of activeTranscodes) {
+    try {
+      if (!ff.killed) {
+        console.log('[server] Killing FFmpeg process', ff.pid);
+        ff.kill(isWin ? undefined : 'SIGTERM');
+      }
+    } catch {}
+  }
+  activeTranscodes.clear();
+  // Close the Express server
+  server.close(() => {
+    console.log('[server] Express server closed');
+  });
+}
+
+module.exports = { shutdown };

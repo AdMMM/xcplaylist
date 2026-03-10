@@ -131,10 +131,12 @@ function waitForServer(retries = 30) {
   });
 }
 
+let serverModule = null;
+
 app.whenReady().then(async () => {
   // Start the Express server in-process
   process.env.PORT = PORT;
-  require('./server');
+  serverModule = require('./server');
 
   buildMenu();
   await waitForServer();
@@ -143,6 +145,21 @@ app.whenReady().then(async () => {
 
 app.on('window-all-closed', () => {
   app.quit();
+});
+
+// Clean up Express server + FFmpeg processes before quitting
+app.on('before-quit', () => {
+  if (serverModule && serverModule.shutdown) {
+    serverModule.shutdown();
+  }
+});
+
+// Force-exit if something is still holding the process open
+app.on('will-quit', () => {
+  setTimeout(() => {
+    console.log('[electron] Force exiting');
+    process.exit(0);
+  }, 2000);
 });
 
 app.on('activate', () => {
