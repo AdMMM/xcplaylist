@@ -136,8 +136,12 @@ const App = (() => {
     // PiP events
     video.addEventListener('enterpictureinpicture', () => {
       playerOverlay.classList.add('hidden');
+      // Set document title so PiP window shows channel name instead of URL
+      const name = playerTitle.textContent;
+      if (name) document.title = name;
     });
     video.addEventListener('leavepictureinpicture', () => {
+      document.title = 'XCPlaylist - IPTV Player';
       if (currentPlayingItem) {
         playerOverlay.classList.remove('hidden');
       }
@@ -263,15 +267,25 @@ const App = (() => {
     loginBtn.textContent = 'Connect';
   }
 
-  function tryAutoLogin() {
+  async function tryAutoLogin() {
     const saved = localStorage.getItem('xc_creds');
     if (saved) {
       try {
         const { server, username, password } = JSON.parse(saved);
+        // Pre-fill form as fallback
         $('server-url').value = server;
         $('username').value = username;
         $('password').value = password;
-      } catch {}
+
+        // Attempt silent auto-login
+        XC.setCreds(server, username, password);
+        const data = await XC.auth();
+        if (data.user_info?.auth === 0) throw new Error('Auth failed');
+        showApp();
+      } catch {
+        // Auto-login failed — stay on login screen with pre-filled fields
+        XC.clearCreds();
+      }
     }
   }
 
@@ -568,6 +582,10 @@ const App = (() => {
   function openPlayer(title, url, live) {
     playerTitle.textContent = title;
     playerOverlay.classList.remove('hidden');
+    // Set Media Session metadata so PiP window shows channel name
+    if ('mediaSession' in navigator) {
+      navigator.mediaSession.metadata = new MediaMetadata({ title });
+    }
     updateFavBtn();
     // currentFormatIndex is set by playLive/playVod/playSeries before calling openPlayer
     $('ctrl-format').title = `Format: ${getFormatLabel(getFormatCycle()[currentFormatIndex] || 'ts')} (click to switch)`;

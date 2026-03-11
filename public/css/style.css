@@ -801,6 +801,9 @@ html, body {
   white-space: nowrap;
 }
 
+/* ===== Fullscreen Button ===== */
+#ctrl-fullscreen { margin-left: auto; }
+
 /* ===== PiP Button ===== */
 #ctrl-pip { display: flex; align-items: center; }
 #ctrl-pip svg { display: block; }
