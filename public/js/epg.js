@@ -154,5 +154,35 @@ const EPG = (() => {
     return null;
   }
 
-  return { load, getShortEpg, getCurrentProgramme, formatTime, parseTime };
+  function getData() { return epgData; }
+
+  function getTimelineProgrammes(epgChannelId, rangeStart, rangeEnd) {
+    if (!epgData || !epgData.programmes) return [];
+    const progs = epgData.programmes[epgChannelId];
+    if (!progs) return [];
+
+    const now = new Date();
+    const results = [];
+
+    for (const p of progs) {
+      const start = parseTime(p.start);
+      const stop = parseTime(p.stop);
+      if (!start || !stop) continue;
+      if (stop <= rangeStart || start >= rangeEnd) continue;
+
+      results.push({
+        start,
+        stop,
+        title: cleanText(p.title || ''),
+        desc: cleanText(p.desc || ''),
+        isNow: now >= start && now < stop,
+        isPast: now >= stop,
+        isFuture: now < start,
+      });
+    }
+
+    return results.sort((a, b) => a.start - b.start);
+  }
+
+  return { load, getShortEpg, getCurrentProgramme, formatTime, parseTime, getData, getTimelineProgrammes, cleanText };
 })();

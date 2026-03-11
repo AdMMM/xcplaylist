@@ -10,6 +10,7 @@ const App = (() => {
   let reminders = {};
   let searchTimeout = null;
   let currentPlayingItem = null;
+  let guideMode = false;
 
   // Channel zapping
   let liveChannelList = [];
@@ -78,6 +79,7 @@ const App = (() => {
     }
 
     Player.init($('video-player'));
+    Guide.init();
     loadFavorites();
     loadHistory();
     loadContinueWatching();
@@ -306,7 +308,13 @@ const App = (() => {
 
   // ===== Sections =====
   async function switchSection(section) {
-    currentSection = section;
+    // Hide guide if switching away
+    if (guideMode && section !== 'guide') {
+      Guide.hide();
+      guideMode = false;
+    }
+
+    currentSection = section === 'guide' ? 'live' : section;
     currentCategoryId = null;
     searchInput.value = '';
     channelGrid.innerHTML = '';
@@ -330,12 +338,23 @@ const App = (() => {
 
     try {
       let categories;
-      if (section === 'live') categories = await XC.liveCategories();
+      if (section === 'guide' || section === 'live') categories = await XC.liveCategories();
       else if (section === 'vod') categories = await XC.vodCategories();
       else if (section === 'series') categories = await XC.seriesCategories();
 
       renderCategories(categories || []);
-      await loadItems();
+
+      if (section === 'guide') {
+        guideMode = true;
+        if (!currentCategoryId) {
+          Guide.showMessage('Select a category to view the programme guide');
+        } else {
+          allItems = await XC.liveStreams(currentCategoryId);
+          Guide.show(allItems);
+        }
+      } else {
+        await loadItems();
+      }
     } catch (e) {
       channelGrid.innerHTML = `<div class="no-results">Failed to load: ${e.message}</div>`;
     }
@@ -370,7 +389,18 @@ const App = (() => {
     if (btn) btn.classList.add('active');
     searchInput.value = '';
     showLoading(true);
-    await loadItems();
+
+    if (guideMode) {
+      if (!currentCategoryId) {
+        Guide.showMessage('Select a category to view the programme guide');
+      } else {
+        allItems = await XC.liveStreams(currentCategoryId);
+        Guide.show(allItems);
+      }
+    } else {
+      await loadItems();
+    }
+
     showLoading(false);
   }
 
@@ -441,6 +471,12 @@ const App = (() => {
 
   function filterItems() {
     const q = searchInput.value.toLowerCase().trim();
+    if (guideMode) {
+      if (!q) { Guide.show(allItems); return; }
+      const filtered = allItems.filter(item => (item.name || '').toLowerCase().includes(q));
+      Guide.show(filtered);
+      return;
+    }
     if (!q) {
       renderItems(allItems);
       return;
@@ -1391,4 +1427,19 @@ const App = (() => {
 
   // Boot
   document.addEventListener('DOMContentLoaded', init);
+
+  // Public API for Guide module
+  return {
+    playLiveFromGuide: (stream) => playLive(stream),
+    openCatchupPlayer: (channelName, progTitle, url) => {
+      currentPlayingItem = { type: 'live', item: { name: channelName } };
+      openPlayer(`${channelName} — ${progTitle} (Catch-Up)`, url, false);
+      epgPanel.classList.add('hidden');
+    },
+    isReminderSet: (key) => !!reminders[key],
+    toggleReminderFromGuide: (programme, stream) => {
+      setReminder(programme, stream.stream_id, stream.name, stream);
+    },
+    getCurrentStreamId: () => currentPlayingItem?.item?.stream_id || null,
+  };
 })();

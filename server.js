@@ -243,6 +243,19 @@ app.post('/api/stream/url', (req, res) => {
   res.json({ url: `${proxy}?url=${encodeURIComponent(rawUrl)}` });
 });
 
+// Catch-up / timeshift stream URL builder
+app.post('/api/stream/catchup', (req, res) => {
+  const { server, username, password, stream_id, start, duration } = req.body;
+  if (!stream_id || !start || !duration) {
+    return res.status(400).json({ error: 'Missing stream_id, start, or duration' });
+  }
+  const base = server.replace(/\/+$/, '');
+  const user = encodeURIComponent(username);
+  const pass = encodeURIComponent(password);
+  const rawUrl = `${base}/timeshift/${user}/${pass}/${duration}/${start}/${stream_id}.ts`;
+  res.json({ url: `/api/stream?url=${encodeURIComponent(rawUrl)}` });
+});
+
 // Proxy stream (avoids CORS for HLS manifests, segments, and VOD)
 app.get('/api/proxy', (req, res) => {
   const target = req.query.url;

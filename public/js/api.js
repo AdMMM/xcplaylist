@@ -69,5 +69,8 @@ const XC = (() => {
     },
 
     proxyUrl: (url) => `/api/proxy?url=${encodeURIComponent(url)}`,
+
+    catchupUrl: (stream_id, start, duration) =>
+      post('/api/stream/catchup', { stream_id, start, duration }),
   };
 })();
