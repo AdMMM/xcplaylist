@@ -46,6 +46,7 @@ const Guide = (() => {
       timeHeaders.scrollLeft = programmes.scrollLeft;
       channels.scrollTop = programmes.scrollTop;
       updateNowBtnState();
+      updateDateLabel();
       scheduleRender();
       scrollSource = null;
     });
@@ -116,14 +117,12 @@ const Guide = (() => {
     const existingChSpacer = channels.querySelector('.guide-ch-spacer');
     if (existingChSpacer) existingChSpacer.style.display = '';
 
-    // Date label
-    dateLabel.textContent = now.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
-
     renderTimeHeaders();
     setupScrollArea();
     renderVisibleRows(true);
     updateNowLine();
     scrollToNow();
+    updateDateLabel();
 
     clearInterval(nowLineInterval);
     nowLineInterval = setInterval(() => {
@@ -376,6 +375,14 @@ const Guide = (() => {
     const center = programmes.scrollLeft + programmes.clientWidth / 2;
     const near = Math.abs(nowPx - center) < programmes.clientWidth / 4;
     nowBtn.classList.toggle('dimmed', near);
+  }
+
+  function updateDateLabel() {
+    // Show the date at the centre of the visible horizontal range
+    const centerPx = programmes.scrollLeft + programmes.clientWidth / 2;
+    const centerMs = timelineStart.getTime() + (centerPx / PX_PER_MIN) * 60000;
+    const centerDate = new Date(centerMs);
+    dateLabel.textContent = centerDate.toLocaleDateString([], { weekday: 'long', month: 'short', day: 'numeric' });
   }
 
   function updateProgressBars() {
