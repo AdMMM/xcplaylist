@@ -10,9 +10,10 @@
     "dev": "node --watch server.js",
     "electron": "electron .",
     "ffmpeg:download": "node scripts/download-ffmpeg.js all",
-    "dist:mac": "node scripts/download-ffmpeg.js mac && electron-builder --mac",
-    "dist:win": "node scripts/download-ffmpeg.js win && electron-builder --win",
-    "dist:all": "node scripts/download-ffmpeg.js all && electron-builder --mac --win"
+    "imdb:build": "node scripts/build-imdb-ratings.js",
+    "dist:mac": "node scripts/download-ffmpeg.js mac && node scripts/build-imdb-ratings.js && electron-builder --mac",
+    "dist:win": "node scripts/download-ffmpeg.js win && node scripts/build-imdb-ratings.js && electron-builder --win",
+    "dist:all": "node scripts/download-ffmpeg.js all && node scripts/build-imdb-ratings.js && electron-builder --mac --win"
   },
   "dependencies": {
     "express": "^4.21.0",
@@ -50,6 +51,10 @@
         {
           "from": "build/ffmpeg-mac/ffmpeg",
           "to": "bin/ffmpeg"
+        },
+        {
+          "from": "build/imdb-ratings.json.gz",
+          "to": "imdb-ratings.json.gz"
         }
       ]
     },
@@ -67,6 +72,10 @@
         {
           "from": "build/ffmpeg-win/ffmpeg.exe",
           "to": "bin/ffmpeg.exe"
+        },
+        {
+          "from": "build/imdb-ratings.json.gz",
+          "to": "imdb-ratings.json.gz"
         }
       ]
     },

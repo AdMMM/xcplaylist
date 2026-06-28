@@ -59,6 +59,18 @@
           <div id="continue-list"></div>
         </div>
 
+        <!-- Sort toolbar (Movies/Series) -->
+        <div id="content-toolbar" class="hidden">
+          <label class="sort-label" for="sort-select">Sort</label>
+          <select id="sort-select">
+            <option value="default">Default order</option>
+            <option value="imdb">IMDb rating (weighted)</option>
+            <option value="imdb_raw">IMDb rating (raw)</option>
+            <option value="recent">Recently added</option>
+            <option value="year">Year (newest first)</option>
+            <option value="name">Name (A → Z)</option>
+          </select>
+        </div>
         <!-- Channel / VOD grid -->
         <div id="channel-grid" class="grid"></div>
 
@@ -140,8 +152,8 @@
     <!-- Series Detail Overlay -->
     <div id="series-overlay" class="hidden">
       <div id="series-header">
-        <button id="series-close" class="icon-btn">&times;</button>
         <span id="series-title"></span>
+        <button id="series-close" class="icon-btn">&times;</button>
       </div>
       <div id="series-content">
         <div id="series-info"></div>
@@ -150,6 +162,15 @@
       </div>
     </div>
   </div>
+
+  <!-- Right-click context menu for grid tiles -->
+  <div id="card-menu" class="card-menu hidden"></div>
+
+  <!-- Movie info side drawer -->
+  <aside id="detail-drawer" class="detail-drawer hidden">
+    <button id="detail-close" class="detail-close" title="Close">&times;</button>
+    <div id="detail-body"></div>
+  </aside>
 
   <!-- HLS.js (BSD) + mpegts.js (Apache-2.0) vendored locally (js/vendor/) so the
        desktop app needs no live CDN at runtime and works fully offline. -->

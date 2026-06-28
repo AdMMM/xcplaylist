@@ -11,6 +11,7 @@ const App = (() => {
   let searchTimeout = null;
   let currentPlayingItem = null;
   let guideMode = false;
+  let currentSort = 'default';
 
   // Channel zapping
   let liveChannelList = [];
@@ -49,6 +50,12 @@ const App = (() => {
   const sidebar = $('sidebar');
   const categoryList = $('category-list');
   const channelGrid = $('channel-grid');
+  const contentToolbar = $('content-toolbar');
+  const sortSelect = $('sort-select');
+  const cardMenu = $('card-menu');
+  const detailDrawer = $('detail-drawer');
+  const detailBody = $('detail-body');
+  const contentEl = $('content');
   const loading = $('loading');
   const searchInput = $('search-input');
   const playerOverlay = $('player-overlay');
@@ -86,6 +93,7 @@ const App = (() => {
     loadContinueWatching();
     loadReminders();
     loadFormatMemory();
+    localStorage.removeItem('xc_empty_series'); // clear tiles wrongly hidden by the dropped removal feature
     bindEvents();
     tryAutoLogin();
     // Check if server has FFmpeg for audio transcoding
@@ -118,6 +126,25 @@ const App = (() => {
     searchInput.addEventListener('input', () => {
       clearTimeout(searchTimeout);
       searchTimeout = setTimeout(filterItems, 200);
+    });
+
+    // Sort
+    sortSelect.addEventListener('change', () => {
+      currentSort = sortSelect.value;
+      filterItems();
+    });
+
+    // Right-click context menu dismissal
+    document.addEventListener('click', hideCardMenu);
+    document.addEventListener('scroll', hideCardMenu, true);
+    window.addEventListener('keydown', (e) => { if (e.key === 'Escape') { hideCardMenu(); closeDetail(); } });
+
+    // Movie detail drawer — close on click outside (not on a tile, which opens it)
+    $('detail-close').addEventListener('click', closeDetail);
+    document.addEventListener('click', (e) => {
+      if (detailDrawer.classList.contains('hidden')) return;
+      if (e.target.closest('#detail-drawer') || e.target.closest('.card')) return;
+      closeDetail();
     });
 
     // Player controls
@@ -319,6 +346,12 @@ const App = (() => {
     currentCategoryId = null;
     searchInput.value = '';
     channelGrid.innerHTML = '';
+    hideCardMenu();
+    closeDetail();
+    // Sorting only applies to Movies/Series (VOD/series carry added/rating).
+    currentSort = 'default';
+    sortSelect.value = 'default';
+    contentToolbar.classList.toggle('hidden', !(section === 'vod' || section === 'series'));
     categoryList.innerHTML = '';
     continueWatchingEl.classList.add('hidden');
 
@@ -414,7 +447,8 @@ const App = (() => {
       } else if (currentSection === 'series') {
         allItems = await XC.seriesStreams(currentCategoryId);
       }
-      renderItems(allItems || []);
+      allItems = allItems || [];
+      filterItems();
     } catch (e) {
       channelGrid.innerHTML = `<div class="no-results">Error loading content</div>`;
     }
@@ -443,7 +477,10 @@ const App = (() => {
       if (currentSection === 'live') {
         sub = item.category_name || '';
       } else if (currentSection === 'vod' || currentSection === 'series') {
-        sub = item.rating ? `Rating: ${item.rating}` : '';
+        let rate = item.imdb_rating;
+        // Show the weighted score on the tile when that's what we're sorting by.
+        if (rate && currentSort === 'imdb') rate = imdbWeighted(item).toFixed(1);
+        sub = rate ? `★ ${rate} IMDb` : (item.year ? String(item.year) : '');
       }
 
       card.innerHTML = `
@@ -464,29 +501,64 @@ const App = (() => {
       }
 
       card.addEventListener('click', () => handleItemClick(item));
+      card.addEventListener('contextmenu', (e) => { e.preventDefault(); showCardMenu(e, item); });
       frag.appendChild(card);
     });
 
     channelGrid.appendChild(frag);
   }
 
+  // Sort the grid. Movies carry `added` (unix ts) + `year`; series carry
+  // `last_modified` + `year`. Rating is TMDB-sourced and heavily clustered
+  // (~6.5 for everything), so it's deliberately not offered.
+  const itemName = (i) => i.name || i.title || '';
+
+  // IMDb weighted (Bayesian) rating: a 9.0 with 12 votes shouldn't beat an 8.4
+  // with 500k. Items without an IMDb match sort to the bottom.
+  const IMDB_C = 7.0, IMDB_M = 1000;
+  function imdbWeighted(i) {
+    const r = i.imdb_rating, v = i.imdb_votes || 0;
+    if (!r) return -1;
+    return (v / (v + IMDB_M)) * r + (IMDB_M / (v + IMDB_M)) * IMDB_C;
+  }
+
+  // IMDb raw rating, but only count titles with at least this many votes (so a
+  // 9.x from a handful of votes is ignored). Low cutoff so newer well-rated
+  // titles still surface, even if a bit gamed.
+  const IMDB_RAW_MIN_VOTES = 500;
+  function imdbRaw(i) {
+    return (i.imdb_rating && (i.imdb_votes || 0) >= IMDB_RAW_MIN_VOTES) ? i.imdb_rating : -1;
+  }
+
+  function sortItems(items) {
+    if (currentSort === 'default') return items;
+    const arr = items.slice();
+    if (currentSort === 'recent') {
+      arr.sort((a, b) => (Number(b.added || b.last_modified) || 0) - (Number(a.added || a.last_modified) || 0));
+    } else if (currentSort === 'year') {
+      arr.sort((a, b) => (parseInt(b.year, 10) || 0) - (parseInt(a.year, 10) || 0) || itemName(a).localeCompare(itemName(b)));
+    } else if (currentSort === 'imdb') {
+      arr.sort((a, b) => imdbWeighted(b) - imdbWeighted(a));
+    } else if (currentSort === 'imdb_raw') {
+      arr.sort((a, b) => imdbRaw(b) - imdbRaw(a) || (b.imdb_votes || 0) - (a.imdb_votes || 0));
+    } else if (currentSort === 'name') {
+      arr.sort((a, b) => itemName(a).localeCompare(itemName(b)));
+    }
+    return arr;
+  }
+
   function filterItems() {
     const q = searchInput.value.toLowerCase().trim();
+    const list = allItems || [];
     if (guideMode) {
-      if (!q) { Guide.show(allItems); return; }
-      const filtered = allItems.filter(item => (item.name || '').toLowerCase().includes(q));
+      const filtered = q ? list.filter(item => (item.name || '').toLowerCase().includes(q)) : list;
       Guide.show(filtered);
       return;
     }
-    if (!q) {
-      renderItems(allItems);
-      return;
-    }
-    const filtered = allItems.filter((item) => {
-      const name = (item.name || item.title || '').toLowerCase();
-      return name.includes(q);
-    });
-    renderItems(filtered);
+    const filtered = q
+      ? list.filter(item => (item.name || item.title || '').toLowerCase().includes(q))
+      : list;
+    renderItems(sortItems(filtered));
   }
 
   // ===== Item Click Handlers =====
@@ -494,18 +566,18 @@ const App = (() => {
     if (currentSection === 'live') {
       await playLive(item);
     } else if (currentSection === 'vod') {
-      await playVod(item);
+      openMovieDetail(item);              // info first; Play lives in the drawer
     } else if (currentSection === 'series') {
       await showSeries(item);
     } else if (currentSection === 'favorites') {
       const favData = item._favData;
       if (favData.type === 'live') await playLive(favData.item);
-      else if (favData.type === 'vod') await playVod(favData.item);
+      else if (favData.type === 'vod') openMovieDetail(favData.item);
       else if (favData.type === 'series') await showSeries(favData.item);
     } else if (currentSection === 'history') {
       const histData = item._histData;
       if (histData.type === 'live') await playLive(histData.item);
-      else if (histData.type === 'vod') await playVod(histData.item);
+      else if (histData.type === 'vod') openMovieDetail(histData.item);
       else if (histData.type === 'series') await showSeries(histData.item);
     }
   }
@@ -1268,13 +1340,20 @@ const App = (() => {
     reminderToast.classList.remove('hidden');
 
     const watchBtn = $('toast-watch');
-    watchBtn.onclick = () => {
-      hideToast();
-      playLive({ stream_id: reminder.itemStreamId, name: reminder.itemName || reminder.channelName });
-    };
+    if (reminder) {
+      watchBtn.style.display = '';
+      watchBtn.onclick = () => {
+        hideToast();
+        playLive({ stream_id: reminder.itemStreamId, name: reminder.itemName || reminder.channelName });
+      };
+    } else {
+      // Plain info toast (e.g. "no episodes") — no Watch action.
+      watchBtn.style.display = 'none';
+      watchBtn.onclick = null;
+    }
 
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(hideToast, 15000);
+    toastTimer = setTimeout(hideToast, reminder ? 15000 : 4000);
   }
 
   function hideToast() {
@@ -1284,50 +1363,62 @@ const App = (() => {
 
   // ===== Series =====
   async function showSeries(item) {
+    // Fetch FIRST, decide SECOND — so an episode-less series never flashes the
+    // overlay open then closed; it just vanishes from the grid.
+    showLoading(true);
+    let data;
+    try {
+      data = await XC.seriesInfo(item.series_id);
+    } catch (e) {
+      showLoading(false);
+      seriesOverlay.classList.remove('hidden');
+      seriesTitle.textContent = item.name || item.title || 'Series';
+      seriesInfo.innerHTML = '';
+      seasonTabs.innerHTML = '';
+      episodeListEl.innerHTML = '<div class="no-results">Failed to load series</div>';
+      return;
+    }
+
+    showLoading(false);
+    const info = data.info || {};
+    const episodes = data.episodes || {};
+    const seasons = Object.keys(episodes).sort((a, b) => Number(a) - Number(b));
+
+    // Provider returned no playable episodes (often a temporary provider gap).
+    // Just inform — leave the tile so it works again when episodes return.
+    if (!seasons.length) {
+      showToast('Currently no episodes available');
+      return;
+    }
+
     seriesOverlay.classList.remove('hidden');
     seriesTitle.textContent = item.name || item.title || 'Series';
-    seriesInfo.innerHTML = '<div class="spinner"></div>';
     seasonTabs.innerHTML = '';
     episodeListEl.innerHTML = '';
+    seriesInfo.innerHTML = `
+      ${info.cover ? `<img src="${escHtml(info.cover)}" alt="" onerror="this.style.display='none'">` : ''}
+      <div class="info-text">
+        <h2>${escHtml(info.name || item.name || '')}</h2>
+        ${info.genre ? `<p><strong>Genre:</strong> ${escHtml(info.genre)}</p>` : ''}
+        ${info.rating ? `<p><strong>Rating:</strong> ${escHtml(String(info.rating))}</p>` : ''}
+        ${info.plot ? `<p>${escHtml(info.plot)}</p>` : ''}
+        ${info.cast ? `<p><strong>Cast:</strong> ${escHtml(info.cast)}</p>` : ''}
+      </div>
+    `;
 
-    try {
-      const data = await XC.seriesInfo(item.series_id);
-      const info = data.info || {};
-      const episodes = data.episodes || {};
-
-      seriesInfo.innerHTML = `
-        ${info.cover ? `<img src="${escHtml(info.cover)}" alt="" onerror="this.style.display='none'">` : ''}
-        <div class="info-text">
-          <h2>${escHtml(info.name || item.name || '')}</h2>
-          ${info.genre ? `<p><strong>Genre:</strong> ${escHtml(info.genre)}</p>` : ''}
-          ${info.rating ? `<p><strong>Rating:</strong> ${escHtml(String(info.rating))}</p>` : ''}
-          ${info.plot ? `<p>${escHtml(info.plot)}</p>` : ''}
-          ${info.cast ? `<p><strong>Cast:</strong> ${escHtml(info.cast)}</p>` : ''}
-        </div>
-      `;
-
-      const seasons = Object.keys(episodes).sort((a, b) => Number(a) - Number(b));
-      if (!seasons.length) {
-        episodeListEl.innerHTML = '<div class="no-results">No episodes available</div>';
-        return;
-      }
-
-      seasons.forEach((s, i) => {
-        const btn = document.createElement('button');
-        btn.className = 'season-tab' + (i === 0 ? ' active' : '');
-        btn.textContent = `Season ${s}`;
-        btn.addEventListener('click', () => {
-          document.querySelectorAll('.season-tab').forEach((b) => b.classList.remove('active'));
-          btn.classList.add('active');
-          renderEpisodes(episodes[s], info.name || item.name);
-        });
-        seasonTabs.appendChild(btn);
+    seasons.forEach((s, i) => {
+      const btn = document.createElement('button');
+      btn.className = 'season-tab' + (i === 0 ? ' active' : '');
+      btn.textContent = `Season ${s}`;
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.season-tab').forEach((b) => b.classList.remove('active'));
+        btn.classList.add('active');
+        renderEpisodes(episodes[s], info.name || item.name);
       });
+      seasonTabs.appendChild(btn);
+    });
 
-      renderEpisodes(episodes[seasons[0]], info.name || item.name);
-    } catch (e) {
-      seriesInfo.innerHTML = `<div class="no-results">Failed to load series info</div>`;
-    }
+    renderEpisodes(episodes[seasons[0]], info.name || item.name);
   }
 
   function renderEpisodes(episodes, seriesName) {
@@ -1361,6 +1452,111 @@ const App = (() => {
       });
       episodeListEl.appendChild(div);
     });
+  }
+
+  // ===== Right-click context menu =====
+  // Resolve the real {type, item} for a grid tile (Favourites/History tiles
+  // wrap the original item).
+  function resolveItemRef(item) {
+    if (currentSection === 'favorites' && item._favData) {
+      return { type: item._favData.type, item: item._favData.item };
+    }
+    if (currentSection === 'history' && item._histData) {
+      return { type: item._histData.type, item: item._histData.item };
+    }
+    return { type: currentSection, item };
+  }
+
+  function showCardMenu(e, item) {
+    const { type, item: realItem } = resolveItemRef(item);
+    const fav = isFavorite(type, realItem);
+
+    cardMenu.innerHTML = '';
+    const favBtn = document.createElement('button');
+    favBtn.className = 'card-menu-item';
+    favBtn.textContent = fav ? '☆  Remove from Favourites' : '★  Add to Favourites';
+    favBtn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      toggleFavorite(type, realItem);
+      hideCardMenu();
+      // Refresh so the star (and the Favourites grid) reflect the change.
+      if (currentSection === 'favorites') renderFavorites();
+      else filterItems();
+    });
+    cardMenu.appendChild(favBtn);
+
+    // Show, then clamp within the viewport.
+    cardMenu.classList.remove('hidden');
+    const rect = cardMenu.getBoundingClientRect();
+    const x = Math.min(e.clientX, window.innerWidth - rect.width - 8);
+    const y = Math.min(e.clientY, window.innerHeight - rect.height - 8);
+    cardMenu.style.left = `${Math.max(8, x)}px`;
+    cardMenu.style.top = `${Math.max(8, y)}px`;
+  }
+
+  function hideCardMenu() {
+    if (cardMenu) cardMenu.classList.add('hidden');
+  }
+
+  // ===== Movie detail drawer =====
+  function fmtRuntime(mins) {
+    const m = parseInt(mins, 10);
+    if (!m) return '';
+    const h = Math.floor(m / 60), r = m % 60;
+    return h ? `${h}h ${r}m` : `${r}m`;
+  }
+  function fmtVotes(v) {
+    if (!v) return '';
+    if (v >= 1e6) return (v / 1e6).toFixed(1).replace(/\.0$/, '') + 'M';
+    if (v >= 1e3) return (v / 1e3).toFixed(1).replace(/\.0$/, '') + 'k';
+    return String(v);
+  }
+
+  function openMovieDetail(item) {
+    hideCardMenu();
+    const name = item.name || item.title || '';
+    const img = item.stream_icon || item.cover || '';
+    const meta = [item.year, fmtRuntime(item.episode_run_time), item.genre].filter(Boolean).join(' · ');
+    const imdb = item.imdb_rating
+      ? `<div class="detail-rating">★ ${escHtml(String(item.imdb_rating))} <span>IMDb</span>${item.imdb_votes ? ` · ${fmtVotes(item.imdb_votes)} votes` : ''}</div>`
+      : '';
+    detailBody.innerHTML = `
+      <div class="detail-top">
+        ${img ? `<img class="detail-poster" src="${escHtml(img)}" alt="" onerror="this.style.display='none'">` : ''}
+        <div class="detail-main">
+          <h2 class="detail-title">${escHtml(name)}</h2>
+          <div class="detail-cols">
+            <div class="detail-colL">
+              ${meta ? `<div class="detail-meta">${escHtml(meta)}</div>` : ''}
+              ${imdb}
+            </div>
+            <div class="detail-colR">
+              ${item.cast ? `<div class="detail-extra" title="${escHtml(item.cast)}"><strong>Cast:</strong> ${escHtml(item.cast)}</div>` : ''}
+              ${item.director ? `<div class="detail-extra" title="${escHtml(item.director)}"><strong>Director:</strong> ${escHtml(item.director)}</div>` : ''}
+            </div>
+          </div>
+          <div class="detail-actions">
+            <button id="detail-play" class="detail-play">▶ Play</button>
+            <button id="detail-fav" class="detail-fav"></button>
+          </div>
+        </div>
+      </div>
+      <p class="detail-plot">${escHtml(item.plot || '')}</p>
+    `;
+    const favBtn = $('detail-fav');
+    const syncFav = () => { favBtn.textContent = isFavorite('vod', item) ? '★ Favourited' : '☆ Favourite'; };
+    syncFav();
+    $('detail-play').addEventListener('click', () => { closeDetail(); playVod(item); });
+    favBtn.addEventListener('click', () => {
+      toggleFavorite('vod', item);
+      syncFav();
+      if (currentSection === 'favorites') renderFavorites();
+    });
+    detailDrawer.classList.remove('hidden');
+  }
+
+  function closeDetail() {
+    if (detailDrawer) detailDrawer.classList.add('hidden');
   }
 
   // ===== Favorites =====
