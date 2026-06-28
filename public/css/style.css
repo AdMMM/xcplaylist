@@ -321,10 +321,6 @@ html, body {
 }
 
 /* Buffering spinner overlay */
-#video-player.buffering ~ .buffering-overlay,
-#player-container .buffering-overlay {
-  display: none;
-}
 #player-container:has(#video-player.buffering) .buffering-overlay {
   display: flex;
 }

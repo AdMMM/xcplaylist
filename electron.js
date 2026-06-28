@@ -1,5 +1,4 @@
-const { app, BrowserWindow, Menu } = require('electron');
-const path = require('path');
+const { app, BrowserWindow, Menu, dialog } = require('electron');
 
 const PORT = 3000;
 const isMac = process.platform === 'darwin';
@@ -28,6 +27,13 @@ function createWindow() {
   mainWindow = new BrowserWindow(windowOptions);
 
   mainWindow.loadURL(`http://localhost:${PORT}`);
+
+  // Keep the renderer pinned to the local app: block navigation elsewhere
+  // and deny popup/new windows.
+  mainWindow.webContents.on('will-navigate', (e, url) => {
+    if (!url.startsWith(`http://localhost:${PORT}`)) e.preventDefault();
+  });
+  mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
 
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
@@ -141,6 +147,10 @@ app.whenReady().then(async () => {
   buildMenu();
   await waitForServer();
   createWindow();
+}).catch((err) => {
+  // Fail loud instead of hanging on a blank window if the server never starts.
+  dialog.showErrorBox('XCPlaylist failed to start', String((err && err.stack) || err));
+  app.quit();
 });
 
 app.on('window-all-closed', () => {

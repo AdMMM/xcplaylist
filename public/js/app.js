@@ -53,6 +53,7 @@ const App = (() => {
   const searchInput = $('search-input');
   const playerOverlay = $('player-overlay');
   const playerTitle = $('player-title');
+  let basePlayerTitle = '';
   const playerFav = $('player-fav');
   const epgPanel = $('epg-panel');
   const epgList = $('epg-list');
@@ -156,9 +157,9 @@ const App = (() => {
       Player.seek(pct * Player.duration());
     });
 
-    // Player error
+    // Player error — overwrite (don't append) so messages don't accumulate.
     Player.onError((msg) => {
-      playerTitle.textContent += ` - ${msg}`;
+      playerTitle.textContent = basePlayerTitle + (msg ? ` - ${msg}` : '');
     });
 
     // Series close
@@ -617,6 +618,7 @@ const App = (() => {
   // ===== Player =====
   function openPlayer(title, url, live) {
     playerTitle.textContent = title;
+    basePlayerTitle = title;
     playerOverlay.classList.remove('hidden');
     // Set Media Session metadata so PiP window shows channel name
     if ('mediaSession' in navigator) {
@@ -1298,7 +1300,7 @@ const App = (() => {
         <div class="info-text">
           <h2>${escHtml(info.name || item.name || '')}</h2>
           ${info.genre ? `<p><strong>Genre:</strong> ${escHtml(info.genre)}</p>` : ''}
-          ${info.rating ? `<p><strong>Rating:</strong> ${info.rating}</p>` : ''}
+          ${info.rating ? `<p><strong>Rating:</strong> ${escHtml(String(info.rating))}</p>` : ''}
           ${info.plot ? `<p>${escHtml(info.plot)}</p>` : ''}
           ${info.cast ? `<p><strong>Cast:</strong> ${escHtml(info.cast)}</p>` : ''}
         </div>
@@ -1350,7 +1352,7 @@ const App = (() => {
       div.innerHTML = `
         <span class="ep-num">${ep.episode_num || '?'}</span>
         <span class="ep-title">${escHtml(ep.title || `Episode ${ep.episode_num}`)}</span>
-        ${ep.info?.duration ? `<span class="ep-duration">${ep.info.duration}</span>` : ''}
+        ${ep.info?.duration ? `<span class="ep-duration">${escHtml(String(ep.info.duration))}</span>` : ''}
         ${progressHtml}
       `;
       div.addEventListener('click', () => {
@@ -1433,6 +1435,9 @@ const App = (() => {
     playLiveFromGuide: (stream) => playLive(stream),
     openCatchupPlayer: (channelName, progTitle, url) => {
       currentPlayingItem = { type: 'live', item: { name: channelName } };
+      // Catch-up is a finite MPEG-TS stream. Pass live=false: player.js routes
+      // .ts URLs through mpegts.js (native <video> can't decode raw .ts) while
+      // treating it as finite (no live-edge chasing).
       openPlayer(`${channelName} — ${progTitle} (Catch-Up)`, url, false);
       epgPanel.classList.add('hidden');
     },
