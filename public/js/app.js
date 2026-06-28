@@ -591,7 +591,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(item.stream_id, 'live');
+      url = transcodeSourceUrl(item.stream_id, 'live', item);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -626,7 +626,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(item.stream_id, 'vod');
+      url = transcodeSourceUrl(item.stream_id, 'vod', item);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -657,7 +657,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(episode.id, 'series');
+      url = transcodeSourceUrl(episode.id, 'series', episode);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -744,13 +744,20 @@ const App = (() => {
     if (Player.isLive) return;
     const dur = Player.duration();
     const cur = Player.currentTime();
-    if (!dur || isNaN(dur)) return;
+    // Unknown length (transcoded stream plays as a live feed → duration is
+    // Infinity) — show elapsed only, no bogus total.
+    if (!isFinite(dur) || dur <= 0) {
+      $('progress-fill').style.width = '0%';
+      $('time-display').textContent = fmtTime(cur);
+      return;
+    }
     const pct = (cur / dur) * 100;
     $('progress-fill').style.width = pct + '%';
     $('time-display').textContent = `${fmtTime(cur)} / ${fmtTime(dur)}`;
   }
 
   function fmtTime(s) {
+    if (!isFinite(s) || s < 0) return '0:00';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = Math.floor(s % 60);
@@ -797,6 +804,30 @@ const App = (() => {
     return labels[fmt] || fmt.toUpperCase();
   }
 
+  // Best-effort runtime (seconds) for a VOD item / series episode.
+  function itemDurationSecs(item) {
+    if (!item) return 0;
+    const info = item.info || {};
+    if (Number(info.duration_secs) > 0) return Number(info.duration_secs);
+    if (typeof info.duration === 'string') {
+      const m = info.duration.match(/(\d+):(\d{2}):(\d{2})/);
+      if (m) { const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]); if (t > 0) return t; }
+    }
+    const ert = parseInt(item.episode_run_time, 10);
+    return ert > 0 ? ert * 60 : 0;
+  }
+
+  // Transcode source: prefer the SEEKABLE HLS remux for VOD/series when we know
+  // the runtime; otherwise fall back to the live MPEG-TS pipe.
+  function transcodeSourceUrl(streamId, type, item) {
+    const container = item && item.container_extension;
+    if (type !== 'live') {
+      const hls = XC.hlsTranscodeUrl(streamId, type, container, itemDurationSecs(item));
+      if (hls) return hls;
+    }
+    return XC.transcodeUrl(streamId, type, container);
+  }
+
   async function cycleFormat() {
     if (!currentPlayingItem) return;
     const cycle = getFormatCycle();
@@ -833,7 +864,7 @@ const App = (() => {
     try {
       let url;
       if (fmt === 'transcode') {
-        url = XC.transcodeUrl(streamId, type);
+        url = transcodeSourceUrl(streamId, type, item);
         if (!url) throw new Error('Cannot build transcode URL');
       } else {
         const resp = await XC.streamUrl(streamId, type, fmt);
@@ -927,7 +958,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Audio fix — transcoding via FFmpeg...', 'AAC Fix');
 
-      const url = XC.transcodeUrl(streamId, type);
+      const url = transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();
@@ -944,7 +975,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Unsupported audio — transcoding to AAC...', 'AAC Fix');
 
-      const url = XC.transcodeUrl(streamId, type);
+      const url = transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();

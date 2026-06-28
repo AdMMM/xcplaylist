@@ -45,8 +45,10 @@ const XC = (() => {
     streamUrl: (stream_id, type, container) =>
       post('/api/stream/url', { stream_id, type, container }),
 
-    // Build a transcode URL for a stream (pipes through FFmpeg to convert AC3/EAC3 → AAC)
-    transcodeUrl: (stream_id, type) => {
+    // Build a transcode URL for a stream (pipes through FFmpeg to convert AC3/EAC3 → AAC).
+    // container = the stream's real extension (mkv/mp4/avi…); VOD/series must pass it,
+    // or the upstream 404s when the file isn't .mp4.
+    transcodeUrl: (stream_id, type, container) => {
       if (!_creds) return null;
       const base = _creds.server.replace(/\/+$/, '');
       const user = encodeURIComponent(_creds.username);
@@ -54,9 +56,24 @@ const XC = (() => {
       const pathMap = { live: 'live', vod: 'movie', series: 'series' };
       const segment = pathMap[type];
       if (!segment) return null;
-      const ext = type === 'live' ? 'ts' : 'mp4';
+      const ext = type === 'live' ? 'ts' : (container || 'mp4');
       const rawUrl = `${base}/${segment}/${user}/${pass}/${stream_id}.${ext}`;
       return `/api/transcode?url=${encodeURIComponent(rawUrl)}`;
+    },
+
+    // Seekable transcode for VOD/series: an HLS VOD playlist (needs the title's
+    // duration in seconds). Returns null if duration unknown — caller falls back
+    // to the live-pipe transcodeUrl.
+    hlsTranscodeUrl: (stream_id, type, container, durationSecs) => {
+      if (!_creds || type === 'live' || !durationSecs || durationSecs <= 0) return null;
+      const base = _creds.server.replace(/\/+$/, '');
+      const user = encodeURIComponent(_creds.username);
+      const pass = encodeURIComponent(_creds.password);
+      const pathMap = { vod: 'movie', series: 'series' };
+      const segment = pathMap[type];
+      if (!segment) return null;
+      const rawUrl = `${base}/${segment}/${user}/${pass}/${stream_id}.${container || 'mp4'}`;
+      return `/api/hls/playlist.m3u8?url=${encodeURIComponent(rawUrl)}&dur=${Math.round(durationSecs)}`;
     },
 
     // Check if server-side FFmpeg transcoding is available

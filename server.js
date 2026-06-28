@@ -458,10 +458,14 @@ app.get('/api/transcode', (req, res) => {
   try { parsed = assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
 
   const shortPath = parsed.pathname.split('/').pop();
-  console.log(`[transcode] Starting: ${shortPath}`);
+  // VOD/series are finite files — without -re ffmpeg races through them at
+  // download speed (playback "flies along"). Live sources already pace
+  // themselves, so -re there would just add latency.
+  const isLiveSrc = /\/live\//.test(parsed.pathname);
+  console.log(`[transcode] Starting: ${shortPath}${isLiveSrc ? '' : ' (paced)'}`);
 
   // Spawn FFmpeg: read from URL, copy video, transcode audio to AAC stereo
-  // -re: read at native rate (avoids overwhelming the buffer for live streams)
+  // -re: read at native rate (VOD/series only — avoids racing through the file)
   // -c:v copy: pass video through untouched (no re-encoding = zero quality loss)
   // -c:a aac: transcode audio to AAC (universally supported by browsers)
   // -ac 2: downmix to stereo (5.1 → 2.0)
@@ -469,6 +473,7 @@ app.get('/api/transcode', (req, res) => {
   // -f mpegts: output as MPEG-TS (streamable, works with mpegts.js and HLS.js)
   const ffArgs = [
     '-hide_banner', '-loglevel', 'warning',
+    ...(isLiveSrc ? [] : ['-re']),
     '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
     // Restrict input protocols so a crafted URL can't coax ffmpeg into
     // file:/concat:/etc. (assertProxyTarget already enforces http/https above).
@@ -540,6 +545,67 @@ app.get('/api/transcode', (req, res) => {
 // FFmpeg availability check
 app.get('/api/transcode/check', (req, res) => {
   res.json({ available: !!ffmpegPath });
+});
+
+// ---------- Seekable audio-remux for VOD/series (HLS) ----------
+// Instead of one live MPEG-TS pipe (no seek/duration/resume), serve an up-front
+// VOD HLS playlist computed from the title's known duration, and transcode each
+// segment on demand (video copy, audio→AAC, input -ss seek). hls.js then plays
+// it as seekable VOD. (Jellyfin's approach, simplified to stateless segments.)
+const HLS_SEG = 6; // seconds per segment
+
+app.get('/api/hls/playlist.m3u8', (req, res) => {
+  const target = req.query.url;
+  const total = parseFloat(req.query.dur) || 0;
+  if (!target || total <= 0) return res.status(400).send('Missing url/dur');
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+
+  const n = Math.ceil(total / HLS_SEG);
+  let m = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n';
+  m += `#EXT-X-TARGETDURATION:${HLS_SEG}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
+  for (let i = 0; i < n; i++) {
+    const start = i * HLS_SEG;
+    const len = Math.min(HLS_SEG, total - start);
+    m += `#EXTINF:${len.toFixed(3)},\n`;
+    m += `/api/hls/seg.ts?url=${encodeURIComponent(target)}&start=${start}&dur=${len.toFixed(3)}\n`;
+  }
+  m += '#EXT-X-ENDLIST\n';
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send(m);
+});
+
+app.get('/api/hls/seg.ts', (req, res) => {
+  const target = req.query.url;
+  const start = parseFloat(req.query.start) || 0;
+  const dur = parseFloat(req.query.dur) || HLS_SEG;
+  if (!target) return res.status(400).send('Missing url');
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+  if (!ffmpegPath) return res.status(501).json({ error: 'FFmpeg not available' });
+
+  // -ss before -i = fast input seek to the keyframe at/before `start` (so the
+  // segment begins decodable); copy video, transcode audio. No -copyts: each
+  // segment restarts at ts 0 and hls.js stitches them by playlist order.
+  const ffArgs = [
+    '-hide_banner', '-loglevel', 'error',
+    '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+    '-protocol_whitelist', 'http,https,tcp,tls,crypto',
+    '-ss', String(start),
+    '-i', target,
+    '-t', String(dur),
+    '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
+    '-muxdelay', '0',
+    '-f', 'mpegts', 'pipe:1',
+  ];
+  const ff = spawn(ffmpegPath, ffArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
+  activeTranscodes.add(ff);
+  res.setHeader('Content-Type', 'video/mp2t');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  ff.stdout.pipe(res);
+  ff.stderr.on('data', (c) => { const s = c.toString().trim(); if (s) console.log(`[hls-seg ${start}s] ${s}`); });
+  ff.on('error', (e) => { if (!res.headersSent) res.status(502).end(); });
+  ff.on('close', () => activeTranscodes.delete(ff));
+  req.on('close', () => { if (!ff.killed) ff.kill('SIGKILL'); });
 });
 
 // Catch-all for SPA
