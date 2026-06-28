@@ -217,11 +217,13 @@ html, body {
 .card-img {
   width: 100%;
   aspect-ratio: 16/9;
-  object-fit: cover;
+  object-fit: contain;   /* channel logos vary in size — show the whole logo, don't crop */
   background: #1a1a2e;
   display: block;
+  padding: 8px;
 }
-.card-img.poster { aspect-ratio: 2/3; }
+/* VOD/series posters fill their 2:3 tile */
+.card-img.poster { aspect-ratio: 2/3; object-fit: cover; padding: 0; }
 
 .card-body { padding: 10px; }
 .card-title {
