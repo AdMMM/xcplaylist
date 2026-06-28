@@ -352,6 +352,16 @@ const Player = (() => {
     return 'unknown';
   }
 
+  // Returns: 'ok' | 'novideo' | 'unknown'
+  // 'novideo' = playing for a few seconds but no decoded frames (videoWidth 0),
+  // which means the video codec (e.g. HEVC) can't be decoded in-app.
+  function getVideoHealth() {
+    if (!video) return 'unknown';
+    if (Date.now() - audioCheckStart < 4000) return 'unknown';
+    if (video.paused || video.readyState < 2 || video.currentTime <= 0) return 'unknown';
+    return video.videoWidth > 0 ? 'ok' : 'novideo';
+  }
+
   function getQualityStats() {
     const stats = { resolution: '', health: 'good', codec: '', bitrate: 0, audioCodec: '' };
     if (!video || !video.videoWidth) return stats;
@@ -389,7 +399,7 @@ const Player = (() => {
     init, play, destroy, togglePlay, setVolume, toggleMute,
     isPlaying, isMuted, duration, currentTime, seek,
     toggleFullscreen, togglePiP, getQualityStats, onError,
-    getAudioHealth, resetAudioCheck, seekToLiveEdge,
+    getAudioHealth, getVideoHealth, resetAudioCheck, seekToLiveEdge,
     get isLive() { return isLive; },
     get video() { return video; },
   };

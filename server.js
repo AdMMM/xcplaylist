@@ -1,7 +1,7 @@
 const express = require('express');
 const http = require('http');
 const https = require('https');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execFile } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const path = require('path');
 const fs = require('fs');
@@ -545,6 +545,33 @@ app.get('/api/transcode', (req, res) => {
 // FFmpeg availability check
 app.get('/api/transcode/check', (req, res) => {
   res.json({ available: !!ffmpegPath });
+});
+
+// Hand a stream to a native external player (VLC/IINA/mpv) — the escape hatch
+// for codecs the browser can't decode at all (e.g. HEVC video). Native players
+// decode everything, so this is the robust fallback our web stack can't cover.
+app.get('/api/open-external', (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).send('Missing url');
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+
+  if (process.platform === 'darwin') {
+    const apps = ['VLC', 'IINA', 'mpv'];
+    const tryApp = (i) => {
+      if (i >= apps.length) return res.status(404).json({ error: 'No external player found (install VLC)' });
+      execFile('open', ['-a', apps[i], target], (err) => err ? tryApp(i + 1) : res.json({ ok: true, player: apps[i] }));
+    };
+    tryApp(0);
+  } else if (process.platform === 'win32') {
+    const paths = ['C:\\Program Files\\VideoLAN\\VLC\\vlc.exe', 'C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe'];
+    const tryPath = (i) => {
+      if (i >= paths.length) return res.status(404).json({ error: 'VLC not found' });
+      execFile(paths[i], [target], (err) => err ? tryPath(i + 1) : res.json({ ok: true, player: 'VLC' }));
+    };
+    tryPath(0);
+  } else {
+    execFile('vlc', [target], (err) => err ? res.status(404).json({ error: 'VLC not found' }) : res.json({ ok: true, player: 'VLC' }));
+  }
 });
 
 // ---------- Seekable audio-remux for VOD/series (HLS) ----------

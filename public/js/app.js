@@ -26,6 +26,7 @@ const App = (() => {
   // Audio health check
   let audioCheckInterval = null;
   let audioAutoSwitched = false;
+  let videoFallbackOffered = false;
   // FFmpeg transcode availability
   let transcodeAvailable = false;
 
@@ -153,6 +154,7 @@ const App = (() => {
     $('ctrl-mute').addEventListener('click', () => { Player.toggleMute(); updateMuteBtn(); });
     $('ctrl-fullscreen').addEventListener('click', Player.toggleFullscreen);
     $('ctrl-pip').addEventListener('click', Player.togglePiP);
+    $('ctrl-external').addEventListener('click', openCurrentExternal);
     $('volume-slider').addEventListener('input', (e) => Player.setVolume(parseFloat(e.target.value)));
     $('player-fav').addEventListener('click', toggleCurrentFavorite);
     $('ctrl-format').addEventListener('click', cycleFormat);
@@ -828,6 +830,21 @@ const App = (() => {
     return XC.transcodeUrl(streamId, type, container);
   }
 
+  // Hand the current stream to a native external player (VLC/IINA/mpv) — the
+  // escape hatch for codecs the browser can't decode (e.g. HEVC video).
+  async function openCurrentExternal() {
+    if (!currentPlayingItem) return;
+    const it = currentPlayingItem.item;
+    const raw = XC.rawStreamUrl(String(it.stream_id || it.id), currentPlayingItem.type, it.container_extension);
+    if (!raw) return;
+    try {
+      const r = await XC.openExternal(raw);
+      showToast(`Opened in ${r.player || 'external player'}`);
+    } catch (e) {
+      showToast(e.message || 'No external player found — install VLC');
+    }
+  }
+
   async function cycleFormat() {
     if (!currentPlayingItem) return;
     const cycle = getFormatCycle();
@@ -915,6 +932,7 @@ const App = (() => {
   function startAudioHealthCheck() {
     stopAudioHealthCheck();
     audioAutoSwitched = false;
+    videoFallbackOffered = false;
     // Wait 3.5s for decoder to stabilise, then check every 2s
     audioCheckInterval = setTimeout(() => {
       audioCheckInterval = setInterval(checkAudioHealth, 2000);
@@ -929,7 +947,15 @@ const App = (() => {
   }
 
   function checkAudioHealth() {
-    if (!currentPlayingItem || audioAutoSwitched) return;
+    if (!currentPlayingItem) return;
+
+    // Video codec unsupported (e.g. HEVC) → no decoded frames. Hint once to use VLC.
+    if (!videoFallbackOffered && (currentPlayingItem.type === 'vod' || currentPlayingItem.type === 'series')
+        && Player.getVideoHealth() === 'novideo') {
+      videoFallbackOffered = true;
+      showToast('Video codec not supported in-app — tap ↗ to open in VLC');
+    }
+    if (audioAutoSwitched) return;
 
     const health = Player.getAudioHealth();
     if (health !== 'silent') return; // 'ok' or 'unknown' — no action needed

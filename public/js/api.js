@@ -76,6 +76,26 @@ const XC = (() => {
       return `/api/hls/playlist.m3u8?url=${encodeURIComponent(rawUrl)}&dur=${Math.round(durationSecs)}`;
     },
 
+    // The raw provider stream URL (for handing to an external player).
+    rawStreamUrl: (stream_id, type, container) => {
+      if (!_creds) return null;
+      const base = _creds.server.replace(/\/+$/, '');
+      const user = encodeURIComponent(_creds.username);
+      const pass = encodeURIComponent(_creds.password);
+      const pathMap = { live: 'live', vod: 'movie', series: 'series' };
+      const segment = pathMap[type];
+      if (!segment) return null;
+      const ext = type === 'live' ? 'ts' : (container || 'mp4');
+      return `${base}/${segment}/${user}/${pass}/${stream_id}.${ext}`;
+    },
+
+    // Launch the current stream in a native external player (VLC/IINA/mpv).
+    openExternal: async (rawUrl) => {
+      const r = await window.fetch('/api/open-external?url=' + encodeURIComponent(rawUrl));
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+      return r.json();
+    },
+
     // Check if server-side FFmpeg transcoding is available
     checkTranscode: async () => {
       try {
