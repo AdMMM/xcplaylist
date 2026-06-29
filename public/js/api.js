@@ -89,6 +89,21 @@ const XC = (() => {
       return `${base}/${segment}/${user}/${pass}/${stream_id}.${ext}`;
     },
 
+    // Probe a VOD/series stream's runtime (seconds) via the server. 0 if unknown.
+    probeDuration: async (stream_id, type, container) => {
+      if (!_creds || type === 'live') return 0;
+      const base = _creds.server.replace(/\/+$/, '');
+      const user = encodeURIComponent(_creds.username);
+      const pass = encodeURIComponent(_creds.password);
+      const segment = type === 'series' ? 'series' : 'movie';
+      const raw = `${base}/${segment}/${user}/${pass}/${stream_id}.${container || 'mp4'}`;
+      try {
+        const r = await window.fetch('/api/duration?url=' + encodeURIComponent(raw));
+        if (!r.ok) return 0;
+        return (await r.json()).seconds || 0;
+      } catch { return 0; }
+    },
+
     // Launch the current stream in a native external player (VLC/IINA/mpv).
     openExternal: async (rawUrl) => {
       const r = await window.fetch('/api/open-external?url=' + encodeURIComponent(rawUrl));

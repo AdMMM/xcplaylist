@@ -623,6 +623,7 @@ const App = (() => {
     const remembered = getRememberedFormat(String(item.stream_id));
     const title = item.name || item.title;
     currentPlayingItem = { type: 'vod', item };
+    ensureDuration(item, 'vod'); // probe runtime so audio-fix can use seekable HLS
 
     let url;
     currentFormatIndex = 0;
@@ -654,6 +655,7 @@ const App = (() => {
     const remembered = getRememberedFormat(String(episode.id));
     const title = `${seriesName} - ${episode.title || `Episode ${episode.episode_num}`}`;
     currentPlayingItem = { type: 'series', item: episode };
+    ensureDuration(episode, 'series'); // probe runtime so audio-fix can use seekable HLS
 
     let url;
     currentFormatIndex = 0;
@@ -809,6 +811,7 @@ const App = (() => {
   // Best-effort runtime (seconds) for a VOD item / series episode.
   function itemDurationSecs(item) {
     if (!item) return 0;
+    if (Number(item._durationSecs) > 0) return Number(item._durationSecs); // probed
     const info = item.info || {};
     if (Number(info.duration_secs) > 0) return Number(info.duration_secs);
     if (typeof info.duration === 'string') {
@@ -828,6 +831,17 @@ const App = (() => {
       if (hls) return hls;
     }
     return XC.transcodeUrl(streamId, type, container);
+  }
+
+  // Probe + cache the runtime so the seekable HLS transcode can be used even
+  // when Xtream metadata lacks a duration (e.g. series episodes). Fire-and-forget;
+  // if it doesn't return in time, transcode falls back to the live pipe.
+  async function ensureDuration(item, type) {
+    if (!item || type === 'live' || itemDurationSecs(item) > 0) return;
+    try {
+      const secs = await XC.probeDuration(String(item.stream_id || item.id), type, item.container_extension);
+      if (secs > 0) item._durationSecs = secs;
+    } catch { /* ignore — falls back to live pipe */ }
   }
 
   // Hand the current stream to a native external player (VLC/IINA/mpv) — the

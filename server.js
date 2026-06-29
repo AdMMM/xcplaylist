@@ -547,6 +547,31 @@ app.get('/api/transcode/check', (req, res) => {
   res.json({ available: !!ffmpegPath });
 });
 
+// Probe a stream's runtime (seconds) by reading ffmpeg's header output. Lets the
+// HLS seekable transcode work for titles whose Xtream metadata has no duration
+// (e.g. series episodes). Returns 0 if unknown — caller falls back to the pipe.
+app.get('/api/duration', (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).json({ error: 'Missing url' });
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+  if (!ffmpegPath) return res.json({ seconds: 0 });
+
+  let err = '';
+  const ff = spawn(ffmpegPath, [
+    '-hide_banner', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+    '-protocol_whitelist', 'http,https,tcp,tls,crypto', '-i', target,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  const kill = setTimeout(() => { try { ff.kill('SIGKILL'); } catch {} }, 12000);
+  ff.stderr.on('data', (d) => { err += d.toString(); });
+  ff.on('error', () => { clearTimeout(kill); if (!res.headersSent) res.json({ seconds: 0 }); });
+  ff.on('close', () => {
+    clearTimeout(kill);
+    const m = err.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    const secs = m ? (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]) : 0;
+    if (!res.headersSent) res.json({ seconds: Math.round(secs) });
+  });
+});
+
 // Hand a stream to a native external player (VLC/IINA/mpv) — the escape hatch
 // for codecs the browser can't decode at all (e.g. HEVC video). Native players
 // decode everything, so this is the robust fallback our web stack can't cover.
