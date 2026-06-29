@@ -599,65 +599,36 @@ app.get('/api/open-external', (req, res) => {
   }
 });
 
-// ---------- Seekable audio-remux for VOD/series (HLS) ----------
-// Instead of one live MPEG-TS pipe (no seek/duration/resume), serve an up-front
-// VOD HLS playlist computed from the title's known duration, and transcode each
-// segment on demand (video copy, audio→AAC, input -ss seek). hls.js then plays
-// it as seekable VOD. (Jellyfin's approach, simplified to stateless segments.)
-const HLS_SEG = 6; // seconds per segment
+// ---------- Seekable on-the-fly HLS transcode for VOD/series ----------
+// lib/hls-transcode.js: complete VOD playlist up front + one rolling ffmpeg
+// (re-encode video, forced keyframes, audio AAC) + kill/restart-with-ss on a
+// seek outside the produced window. Working seek/duration/resume, no stutter,
+// and undecodable video (HEVC) also plays in-app.
+const hls = require('./lib/hls-transcode');
+hls.setFfmpegPath(ffmpegPath);
 
 app.get('/api/hls/playlist.m3u8', (req, res) => {
   const target = req.query.url;
   const total = parseFloat(req.query.dur) || 0;
   if (!target || total <= 0) return res.status(400).send('Missing url/dur');
   try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
-
-  const n = Math.ceil(total / HLS_SEG);
-  let m = '#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-PLAYLIST-TYPE:VOD\n';
-  m += `#EXT-X-TARGETDURATION:${HLS_SEG}\n#EXT-X-MEDIA-SEQUENCE:0\n`;
-  for (let i = 0; i < n; i++) {
-    const start = i * HLS_SEG;
-    const len = Math.min(HLS_SEG, total - start);
-    m += `#EXTINF:${len.toFixed(3)},\n`;
-    m += `/api/hls/seg.ts?url=${encodeURIComponent(target)}&start=${start}&dur=${len.toFixed(3)}\n`;
-  }
-  m += '#EXT-X-ENDLIST\n';
-  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.send(m);
-});
-
-app.get('/api/hls/seg.ts', (req, res) => {
-  const target = req.query.url;
-  const start = parseFloat(req.query.start) || 0;
-  const dur = parseFloat(req.query.dur) || HLS_SEG;
-  if (!target) return res.status(400).send('Missing url');
-  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
   if (!ffmpegPath) return res.status(501).json({ error: 'FFmpeg not available' });
 
-  // -ss before -i = fast input seek to the keyframe at/before `start` (so the
-  // segment begins decodable); copy video, transcode audio. No -copyts: each
-  // segment restarts at ts 0 and hls.js stitches them by playlist order.
-  const ffArgs = [
-    '-hide_banner', '-loglevel', 'error',
-    '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
-    '-protocol_whitelist', 'http,https,tcp,tls,crypto',
-    '-ss', String(start),
-    '-i', target,
-    '-t', String(dur),
-    '-c:v', 'copy', '-c:a', 'aac', '-ac', '2', '-b:a', '192k',
-    '-muxdelay', '0',
-    '-f', 'mpegts', 'pipe:1',
-  ];
-  const ff = spawn(ffmpegPath, ffArgs, { stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true });
-  activeTranscodes.add(ff);
-  res.setHeader('Content-Type', 'video/mp2t');
+  hls.ensureSession(target, total);
+  const { playlist } = hls.buildPlaylist(hls.keyFor(target), total);
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
   res.setHeader('Access-Control-Allow-Origin', '*');
-  ff.stdout.pipe(res);
-  ff.stderr.on('data', (c) => { const s = c.toString().trim(); if (s) console.log(`[hls-seg ${start}s] ${s}`); });
-  ff.on('error', (e) => { if (!res.headersSent) res.status(502).end(); });
-  ff.on('close', () => activeTranscodes.delete(ff));
-  req.on('close', () => { if (!ff.killed) ff.kill('SIGKILL'); });
+  res.send(playlist);
+});
+
+app.get('/api/hls/seg.ts', async (req, res) => {
+  const key = req.query.key;
+  const n = parseInt(req.query.n, 10);
+  if (!key || Number.isNaN(n)) return res.status(400).send('Missing key/n');
+  const file = await hls.getSegmentFile(key, n);
+  if (!file) return res.status(404).send('Segment unavailable');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.sendFile(file, { headers: { 'Content-Type': 'video/mp2t' } });
 });
 
 // Catch-all for SPA
@@ -687,6 +658,7 @@ function shutdown() {
     } catch {}
   }
   activeTranscodes.clear();
+  hls.shutdown(); // kill HLS transcode sessions + remove their temp dirs
   // Close the Express server
   server.close(() => {
     console.log('[server] Express server closed');
