@@ -464,13 +464,20 @@ app.get('/api/transcode', (req, res) => {
   const isLiveSrc = /\/live\//.test(parsed.pathname);
   console.log(`[transcode] Starting: ${shortPath}${isLiveSrc ? '' : ' (paced)'}`);
 
-  // Spawn FFmpeg: read from URL, copy video, transcode audio to AAC stereo
+  // Spawn FFmpeg: read from URL, transcode audio to AAC stereo, video either
+  // passed through untouched (default, zero quality loss) or re-encoded to H.264.
   // -re: read at native rate (VOD/series only — avoids racing through the file)
   // -c:v copy: pass video through untouched (no re-encoding = zero quality loss)
+  // -c:v libx264 (vcodec=h264): re-encode video — for codecs the browser can't
+  //   decode (e.g. MPEG-2, HEVC). Triggered when in-app playback shows no frames.
   // -c:a aac: transcode audio to AAC (universally supported by browsers)
   // -ac 2: downmix to stereo (5.1 → 2.0)
   // -b:a 192k: good quality AAC bitrate
   // -f mpegts: output as MPEG-TS (streamable, works with mpegts.js and HLS.js)
+  const reencodeVideo = req.query.vcodec === 'h264';
+  const videoArgs = reencodeVideo
+    ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
+    : ['-c:v', 'copy'];
   const ffArgs = [
     '-hide_banner', '-loglevel', 'warning',
     ...(isLiveSrc ? [] : ['-re']),
@@ -479,7 +486,7 @@ app.get('/api/transcode', (req, res) => {
     // file:/concat:/etc. (assertProxyTarget already enforces http/https above).
     '-protocol_whitelist', 'http,https,tcp,tls,crypto',
     '-i', target,
-    '-c:v', 'copy',
+    ...videoArgs,
     '-c:a', 'aac',
     '-ac', '2',
     '-b:a', '192k',

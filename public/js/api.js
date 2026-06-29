@@ -48,7 +48,7 @@ const XC = (() => {
     // Build a transcode URL for a stream (pipes through FFmpeg to convert AC3/EAC3 → AAC).
     // container = the stream's real extension (mkv/mp4/avi…); VOD/series must pass it,
     // or the upstream 404s when the file isn't .mp4.
-    transcodeUrl: (stream_id, type, container) => {
+    transcodeUrl: (stream_id, type, container, opts) => {
       if (!_creds) return null;
       const base = _creds.server.replace(/\/+$/, '');
       const user = encodeURIComponent(_creds.username);
@@ -58,7 +58,9 @@ const XC = (() => {
       if (!segment) return null;
       const ext = type === 'live' ? 'ts' : (container || 'mp4');
       const rawUrl = `${base}/${segment}/${user}/${pass}/${stream_id}.${ext}`;
-      return `/api/transcode?url=${encodeURIComponent(rawUrl)}`;
+      let u = `/api/transcode?url=${encodeURIComponent(rawUrl)}`;
+      if (opts && opts.vcodec) u += `&vcodec=${encodeURIComponent(opts.vcodec)}`;
+      return u;
     },
 
     // Seekable transcode for VOD/series: an HLS VOD playlist (needs the title's
