@@ -593,7 +593,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = transcodeSourceUrl(item.stream_id, 'live', item);
+      url = await transcodeSourceUrl(item.stream_id, 'live', item);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -629,7 +629,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = transcodeSourceUrl(item.stream_id, 'vod', item);
+      url = await transcodeSourceUrl(item.stream_id, 'vod', item);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -661,7 +661,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = transcodeSourceUrl(episode.id, 'series', episode);
+      url = await transcodeSourceUrl(episode.id, 'series', episode);
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -822,11 +822,13 @@ const App = (() => {
     return ert > 0 ? ert * 60 : 0;
   }
 
-  // Transcode source: prefer the SEEKABLE HLS remux for VOD/series when we know
-  // the runtime; otherwise fall back to the live MPEG-TS pipe.
-  function transcodeSourceUrl(streamId, type, item) {
+  // Transcode source: prefer the SEEKABLE HLS remux for VOD/series. Awaits the
+  // runtime probe so HLS engages even when metadata has no duration (series);
+  // only falls back to the live MPEG-TS pipe if the runtime is truly unknown.
+  async function transcodeSourceUrl(streamId, type, item) {
     const container = item && item.container_extension;
     if (type !== 'live') {
+      await ensureDuration(item, type);
       const hls = XC.hlsTranscodeUrl(streamId, type, container, itemDurationSecs(item));
       if (hls) return hls;
     }
@@ -895,7 +897,7 @@ const App = (() => {
     try {
       let url;
       if (fmt === 'transcode') {
-        url = transcodeSourceUrl(streamId, type, item);
+        url = await transcodeSourceUrl(streamId, type, item);
         if (!url) throw new Error('Cannot build transcode URL');
       } else {
         const resp = await XC.streamUrl(streamId, type, fmt);
@@ -960,7 +962,7 @@ const App = (() => {
     audioCheckInterval = null;
   }
 
-  function checkAudioHealth() {
+  async function checkAudioHealth() {
     if (!currentPlayingItem) return;
 
     // Video codec unsupported (e.g. HEVC) → no decoded frames. Hint once to use VLC.
@@ -998,7 +1000,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Audio fix — transcoding via FFmpeg...', 'AAC Fix');
 
-      const url = transcodeSourceUrl(streamId, type, item);
+      const url = await transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();
@@ -1015,7 +1017,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Unsupported audio — transcoding to AAC...', 'AAC Fix');
 
-      const url = transcodeSourceUrl(streamId, type, item);
+      const url = await transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();
