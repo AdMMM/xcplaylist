@@ -82,7 +82,7 @@ const App = (() => {
   const toastTextEl = $('toast-text');
 
   // ===== Init =====
-  function init() {
+  async function init() {
     // Detect platform for CSS overrides (macOS traffic light padding, etc.)
     if (navigator.platform && navigator.platform.startsWith('Win')) {
       document.body.classList.add('platform-win');
@@ -96,6 +96,18 @@ const App = (() => {
     loadReminders();
     loadFormatMemory();
     localStorage.removeItem('xc_empty_series'); // clear tiles wrongly hidden by the dropped removal feature
+    // Logo fallback: on a broken provider logo, swap to the bundled local logo
+    // (matched by channel name) if one exists, else hide so the plate stays clean.
+    window.__logoFallback = (img) => {
+      const local = img.getAttribute('data-local');
+      if (local && !img.src.endsWith(local)) {
+        img.removeAttribute('data-local');
+        img.src = local;
+      } else {
+        img.style.display = 'none';
+      }
+    };
+    await XC.loadLogoIndex(); // bundled channel-logo pack — ready before first render
     bindEvents();
     tryAutoLogin();
     // Check if server has FFmpeg for audio transcoding
@@ -473,8 +485,12 @@ const App = (() => {
       card.className = 'card';
 
       const isPoster = currentSection === 'vod' || currentSection === 'series';
-      const imgSrc = item.stream_icon || item.cover || '';
       const name = item.name || item.title || '';
+      const provided = item.stream_icon || item.cover || '';
+      // Channel logos fall back to the bundled pack when the provider's URL is
+      // missing or its host is dead/blocked; posters use their own artwork only.
+      const local = isPoster ? '' : XC.localLogo(name);
+      const imgSrc = provided || local;
 
       let sub = '';
       if (currentSection === 'live') {
@@ -488,7 +504,7 @@ const App = (() => {
 
       card.innerHTML = `
         <div class="card-thumb${isPoster ? ' poster' : ''}">
-          ${imgSrc ? `<img class="card-img" src="${escHtml(imgSrc)}" alt="" loading="lazy" onerror="this.style.display='none'">` : ''}
+          ${imgSrc ? `<img class="card-img" src="${escHtml(imgSrc)}" data-local="${escHtml(local)}" alt="" loading="lazy" onerror="window.__logoFallback(this)">` : ''}
         </div>
         ${currentSection === 'live' ? '<span class="card-live">LIVE</span>' : ''}
         <div class="card-body">

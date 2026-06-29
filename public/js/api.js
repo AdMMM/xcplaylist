@@ -10,6 +10,40 @@ const XC = (() => {
 
   function clearCreds() { _creds = null; }
 
+  // Bundled channel-logo fallback (tv-logo/tv-logos, MIT). Many provider
+  // stream_icon URLs are empty or point at dead/blocked hosts; when one is
+  // missing or fails to load we fall back to a local logo matched by name.
+  let _logoIndex = null;
+
+  // MUST mirror normKey() in scripts/build-logos.js.
+  function normLogoKey(s) {
+    return String(s)
+      .toLowerCase()
+      .replace(/\bxtra\b/g, 'extra')
+      .replace(/\+\s*1\b/g, 'plus')
+      .replace(/\b(hd|sd|fhd|uhd|qhd|4k|hevc|h265|h264|vip|raw|backup|feed)\b/g, '')
+      .replace(/[^a-z0-9]+/g, '');
+  }
+
+  async function loadLogoIndex() {
+    if (_logoIndex) return;
+    try {
+      const r = await window.fetch('/logos/index.json');
+      _logoIndex = r.ok ? await r.json() : {};
+    } catch { _logoIndex = {}; }
+  }
+
+  // Local logo URL for a channel name, or '' if none bundled.
+  function localLogo(name) {
+    if (!_logoIndex || !name) return '';
+    const k = normLogoKey(name);
+    if (!k) return '';
+    let file = _logoIndex[k];
+    // A "+1" channel with no dedicated +1 logo falls back to its base channel.
+    if (!file && k.endsWith('plus')) file = _logoIndex[k.slice(0, -4)];
+    return file ? `/logos/${file}` : '';
+  }
+
   async function post(endpoint, extra = {}) {
     const res = await window.fetch(endpoint, {
       method: 'POST',
@@ -24,6 +58,8 @@ const XC = (() => {
     creds,
     setCreds,
     clearCreds,
+    loadLogoIndex,
+    localLogo,
 
     auth: () => post('/api/auth'),
 
