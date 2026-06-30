@@ -4,6 +4,8 @@ const https = require('https');
 const { spawn, execFileSync } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const path = require('path');
+const fs = require('fs');
+const zlib = require('zlib');
 const { xcUrl, buildExtraParams, assertProxyTarget } = require('./lib/url-safety');
 
 // Detect ffmpeg binary location
@@ -123,15 +125,69 @@ function fetch(targetUrl, opts = {}, redirectCount = 0) {
   });
 }
 
+// ---------- IMDb ratings (optional, bundled) ----------
+// A compact { "<normalized-title>|<year>": [rating, votes] } map built at
+// package time by scripts/build-imdb-ratings.js. Used to attach trustworthy
+// ratings to VOD/series so the renderer can show + sort by them. Absent in a
+// dev checkout that hasn't run the build → enrichment is simply skipped.
+let imdbMap = null;
+(function loadImdb() {
+  const candidates = [
+    process.resourcesPath ? path.join(process.resourcesPath, 'imdb-ratings.json.gz') : null,
+    path.join(__dirname, 'build', 'imdb-ratings.json.gz'),
+  ].filter(Boolean);
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(p)) {
+        imdbMap = JSON.parse(zlib.gunzipSync(fs.readFileSync(p)).toString('utf-8'));
+        console.log(`[imdb] loaded ${Object.keys(imdbMap).length} ratings from ${p}`);
+        return;
+      }
+    } catch (e) {
+      console.warn(`[imdb] failed to load ${p}: ${e.message}`);
+    }
+  }
+  console.log('[imdb] no ratings map found — IMDb enrichment disabled');
+})();
+
+function imdbNorm(s) {
+  s = (s || '').toLowerCase().trim().replace(/&/g, ' and ');
+  s = s.replace(/[^a-z0-9]+/g, ' ').trim();
+  return s.startsWith('the ') ? s.slice(4) : s;
+}
+
+function imdbLookup(name, year) {
+  if (!imdbMap || !year) return null;
+  const n = imdbNorm(name);
+  const y = String(year).trim();
+  let r = imdbMap[`${n}|${y}`];
+  if (!r && /^\d{4}$/.test(y)) {
+    r = imdbMap[`${n}|${+y + 1}`] || imdbMap[`${n}|${+y - 1}`]; // release-year drift
+  }
+  return r || null;
+}
+
+// Attach imdb_rating / imdb_votes to each VOD/series item (mutates + returns).
+function enrichImdb(items) {
+  if (!imdbMap || !Array.isArray(items)) return items;
+  for (const it of items) {
+    const r = imdbLookup(it.name || it.title, it.year);
+    if (r) { it.imdb_rating = r[0]; it.imdb_votes = r[1]; }
+  }
+  return items;
+}
+
 // ---------- Generic XC API proxy ----------
 
-function xcProxy(action, extraParams = []) {
+function xcProxy(action, extraParams = [], transform = null) {
   return async (req, res) => {
     try {
       const { server, username, password } = req.body;
       const extra = buildExtraParams(extraParams, req.body);
       const resp = await fetch(xcUrl(server, username, password, action, extra));
-      res.json(JSON.parse(resp.body.toString()));
+      let data = JSON.parse(resp.body.toString());
+      if (transform) data = transform(data);
+      res.json(data);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -158,9 +214,9 @@ app.post('/api/auth', async (req, res) => {
 app.post('/api/live/categories', xcProxy('get_live_categories'));
 app.post('/api/live/streams', xcProxy('get_live_streams', ['category_id']));
 app.post('/api/vod/categories', xcProxy('get_vod_categories'));
-app.post('/api/vod/streams', xcProxy('get_vod_streams', ['category_id']));
+app.post('/api/vod/streams', xcProxy('get_vod_streams', ['category_id'], enrichImdb));
 app.post('/api/series/categories', xcProxy('get_series_categories'));
-app.post('/api/series/streams', xcProxy('get_series', ['category_id']));
+app.post('/api/series/streams', xcProxy('get_series', ['category_id'], enrichImdb));
 app.post('/api/series/info', xcProxy('get_series_info', ['series_id']));
 app.post('/api/vod/info', xcProxy('get_vod_info', ['vod_id']));
 app.post('/api/epg/short', xcProxy('get_short_epg', ['stream_id']));
