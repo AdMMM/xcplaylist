@@ -4,6 +4,7 @@ const https = require('https');
 const { spawn, execFileSync } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const path = require('path');
+const { xcUrl, buildExtraParams, assertProxyTarget } = require('./lib/url-safety');
 
 // Detect ffmpeg binary location
 const isWin = process.platform === 'win32';
@@ -122,20 +123,13 @@ function fetch(targetUrl, opts = {}, redirectCount = 0) {
   });
 }
 
-function xcUrl(server, username, password, action, extra = '') {
-  const base = server.replace(/\/+$/, '');
-  return `${base}/player_api.php?username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}&action=${action}${extra}`;
-}
-
 // ---------- Generic XC API proxy ----------
 
 function xcProxy(action, extraParams = []) {
   return async (req, res) => {
     try {
       const { server, username, password } = req.body;
-      const extra = extraParams
-        .map((p) => req.body[p] ? `&${p}=${req.body[p]}` : '')
-        .join('');
+      const extra = buildExtraParams(extraParams, req.body);
       const resp = await fetch(xcUrl(server, username, password, action, extra));
       res.json(JSON.parse(resp.body.toString()));
     } catch (e) {
@@ -262,7 +256,7 @@ app.get('/api/proxy', (req, res) => {
   if (!target) return res.status(400).send('Missing url');
 
   let parsed;
-  try { parsed = new URL(target); } catch { return res.status(400).send('Invalid url'); }
+  try { parsed = assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
 
   const mod = parsed.protocol === 'https:' ? https : http;
   const shortPath = parsed.pathname.split('/').pop();
@@ -283,6 +277,7 @@ app.get('/api/proxy', (req, res) => {
       proxyRes.resume();
       const loc = proxyRes.headers.location;
       const abs = loc.startsWith('http') ? loc : new URL(loc, target).toString();
+      try { assertProxyTarget(abs); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
       console.log(`[proxy] ${shortPath} -> redirect -> ${abs.split('/').pop()}`);
       return res.redirect(`/api/proxy?url=${encodeURIComponent(abs)}`);
     }
@@ -358,7 +353,7 @@ app.get('/api/stream', (req, res) => {
   if (!target) return res.status(400).send('Missing url');
 
   let parsed;
-  try { parsed = new URL(target); } catch { return res.status(502).send('Invalid url'); }
+  try { parsed = assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
 
   const mod = parsed.protocol === 'https:' ? https : http;
 
@@ -374,7 +369,11 @@ app.get('/api/stream', (req, res) => {
   }, (proxyRes) => {
     if (proxyRes.statusCode >= 300 && proxyRes.statusCode < 400 && proxyRes.headers.location) {
       proxyRes.resume();
-      return res.redirect(`/api/stream?url=${encodeURIComponent(proxyRes.headers.location)}`);
+      const abs = proxyRes.headers.location.startsWith('http')
+        ? proxyRes.headers.location
+        : new URL(proxyRes.headers.location, target).toString();
+      try { assertProxyTarget(abs); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+      return res.redirect(`/api/stream?url=${encodeURIComponent(abs)}`);
     }
 
     const fwd = ['content-type', 'content-length', 'content-range', 'accept-ranges'];
@@ -400,7 +399,7 @@ app.get('/api/transcode', (req, res) => {
   if (!ffmpegPath) return res.status(501).json({ error: 'FFmpeg not available' });
 
   let parsed;
-  try { parsed = new URL(target); } catch { return res.status(400).send('Invalid url'); }
+  try { parsed = assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
 
   const shortPath = parsed.pathname.split('/').pop();
   console.log(`[transcode] Starting: ${shortPath}`);
@@ -415,6 +414,9 @@ app.get('/api/transcode', (req, res) => {
   const ffArgs = [
     '-hide_banner', '-loglevel', 'warning',
     '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+    // Restrict input protocols so a crafted URL can't coax ffmpeg into
+    // file:/concat:/etc. (assertProxyTarget already enforces http/https above).
+    '-protocol_whitelist', 'http,https,tcp,tls,crypto',
     '-i', target,
     '-c:v', 'copy',
     '-c:a', 'aac',
@@ -492,7 +494,9 @@ app.get('*', (req, res) => {
 // Track active FFmpeg processes so we can kill them on shutdown
 const activeTranscodes = new Set();
 
-const server = app.listen(PORT, () => {
+// Bind to loopback only — the server is for this machine's renderer, never
+// the LAN. Without the host arg Node binds all interfaces (0.0.0.0).
+const server = app.listen(PORT, '127.0.0.1', () => {
   console.log(`XCPlaylist running at http://localhost:${PORT}`);
 });
 

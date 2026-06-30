@@ -91,6 +91,9 @@ Installers are output to the `dist/` folder.
 xcplaylist/
   electron.js              # Electron main process (platform-aware)
   server.js                # Express backend (XC API proxy, stream proxy, FFmpeg transcoding)
+  lib/
+    url-safety.js          # URL guard + XC helpers (unit-tested)
+  test/                    # node:test unit tests (run with: npm test)
   scripts/
     download-ffmpeg.js     # Downloads platform-specific FFmpeg for builds
   build/
@@ -101,8 +104,11 @@ xcplaylist/
     js/
       api.js               # XC API client
       player.js            # Video player (mpegts.js + HLS.js + native)
+      parse-time.js        # XMLTV time parsing (unit-tested)
       epg.js               # EPG data handling
+      guide.js             # On-screen EPG guide
       app.js               # Main app controller
+      vendor/              # Vendored hls.js + mpegts.js (no runtime CDN)
 ```
 
 ## How It Works

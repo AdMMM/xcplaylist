@@ -4,28 +4,36 @@
 // Binaries are saved to build/ffmpeg-{platform}/ and bundled via extraResources.
 
 const https = require('https');
-const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { createGunzip } = require('zlib');
 const { pipeline } = require('stream');
 
 const RELEASE = 'b6.1.1';
 const BASE_URL = `https://github.com/eugeneware/ffmpeg-static/releases/download/${RELEASE}`;
 
+// sha256 = SHA-256 of the *decompressed* binary, verified against the
+// eugeneware/ffmpeg-static b6.1.1 GitHub release (fetched over HTTPS). Pinning
+// fails the build if the upstream asset ever changes or a download is tampered with.
 const TARGETS = {
-  win: { file: 'ffmpeg-win32-x64.gz', outDir: 'build/ffmpeg-win', outName: 'ffmpeg.exe' },
-  mac: { file: 'ffmpeg-darwin-arm64.gz', outDir: 'build/ffmpeg-mac', outName: 'ffmpeg' },
+  win: { file: 'ffmpeg-win32-x64.gz', outDir: 'build/ffmpeg-win', outName: 'ffmpeg.exe',
+    sha256: '04e1307997530f9cf2fe35cba2ca7e8875ca91da02f89d6c7243df819c94ad00' },
+  mac: { file: 'ffmpeg-darwin-arm64.gz', outDir: 'build/ffmpeg-mac', outName: 'ffmpeg',
+    sha256: 'a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584' },
 };
 
 function download(url) {
   return new Promise((resolve, reject) => {
     const handler = (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        // Follow redirect
+        // Follow redirect — HTTPS only (the result is bundled as an executable).
         const loc = res.headers.location;
-        const mod = loc.startsWith('https') ? https : http;
-        mod.get(loc, handler).on('error', reject);
+        if (!loc.startsWith('https:')) {
+          res.resume();
+          return reject(new Error(`Refusing non-HTTPS redirect to ${loc}`));
+        }
+        https.get(loc, handler).on('error', reject);
         res.resume();
         return;
       }
@@ -76,23 +84,34 @@ async function downloadTarget(platform) {
     }
   });
 
+  // Write to a temp file and hash the decompressed bytes as they stream through;
+  // only rename into place after the digest matches, so an interrupted or tampered
+  // download never leaves a trusted binary behind.
+  const tmpPath = `${outPath}.partial`;
+  const hash = crypto.createHash('sha256');
   await new Promise((resolve, reject) => {
+    const gunzip = createGunzip();
+    gunzip.on('data', (chunk) => hash.update(chunk));
     pipeline(
       res,
-      createGunzip(),
-      fs.createWriteStream(outPath),
-      (err) => {
-        if (err) reject(err);
-        else resolve();
-      }
+      gunzip,
+      fs.createWriteStream(tmpPath),
+      (err) => (err ? reject(err) : resolve())
     );
   });
 
-  // Make executable (relevant on macOS/Linux)
-  fs.chmodSync(outPath, 0o755);
+  const digest = hash.digest('hex');
+  if (target.sha256 && digest !== target.sha256) {
+    fs.rmSync(tmpPath, { force: true });
+    throw new Error(`${platform}: SHA-256 mismatch\n  expected ${target.sha256}\n  got      ${digest}`);
+  }
+
+  // Make executable (relevant on macOS/Linux), then atomically move into place.
+  fs.chmodSync(tmpPath, 0o755);
+  fs.renameSync(tmpPath, outPath);
 
   const finalSize = fs.statSync(outPath).size;
-  console.log(`\n✓ ${platform}: saved ${target.outName} (${(finalSize / 1024 / 1024).toFixed(1)} MB)`);
+  console.log(`\n✓ ${platform}: verified + saved ${target.outName} (${(finalSize / 1024 / 1024).toFixed(1)} MB)`);
 }
 
 async function main() {

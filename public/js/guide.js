@@ -534,6 +534,8 @@ const Guide = (() => {
 
   function showMessage(text) {
     visible = true;
+    // Stop any now-line ticker left running from a prior show().
+    if (nowLineInterval) { clearInterval(nowLineInterval); nowLineInterval = null; }
     hideHoverCard();
     channels.innerHTML = '';
     programmes.querySelectorAll('.guide-prog-row').forEach(r => r.remove());

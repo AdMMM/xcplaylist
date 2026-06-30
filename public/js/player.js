@@ -8,6 +8,8 @@ const Player = (() => {
   let bufferingTimer = null;
   let stalledRetries = 0;
   const MAX_STALL_RETRIES = 3;
+  let networkRetries = 0;
+  const MAX_NETWORK_RETRIES = 5;
 
   function init(videoEl) {
     video = videoEl;
@@ -15,9 +17,20 @@ const Player = (() => {
     video.addEventListener('waiting', onBuffering);
     video.addEventListener('playing', onPlaying);
     video.addEventListener('stalled', onStalled);
+    // Attached once here (not per play()) so error handlers don't accumulate.
+    video.addEventListener('error', onVideoError);
   }
 
   function onError(cb) { onErrorCb = cb; }
+
+  // Native-video element error (direct MP4/MKV via the /api/stream proxy).
+  function onVideoError() {
+    // hls.js / mpegts.js manage their own errors; only surface when neither owns playback.
+    if (hls || mpegtsPlayer) return;
+    const err = video && video.error;
+    console.warn('[player] Video error:', err?.code, err?.message);
+    if (onErrorCb) onErrorCb('Playback error. Stream may be unavailable.');
+  }
 
   // Show buffering state and auto-recover if stuck too long
   function onBuffering() {
@@ -35,6 +48,7 @@ const Player = (() => {
     clearTimeout(bufferingTimer);
     video.classList.remove('buffering');
     stalledRetries = 0;
+    networkRetries = 0;
   }
 
   function onStalled() {
@@ -80,6 +94,7 @@ const Player = (() => {
   function destroy() {
     clearTimeout(bufferingTimer);
     stalledRetries = 0;
+    networkRetries = 0;
     pausedAt = 0;
     video.classList.remove('buffering');
     if (mpegtsPlayer) {
@@ -142,7 +157,12 @@ const Player = (() => {
         console.warn('[player] HLS error:', data.type, data.details, data.reason);
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            setTimeout(() => hls && hls.startLoad(), 1000);
+            if (networkRetries < MAX_NETWORK_RETRIES) {
+              networkRetries++;
+              setTimeout(() => hls && hls.startLoad(), 1000);
+            } else if (onErrorCb) {
+              onErrorCb('Playback error. Stream may be unavailable.');
+            }
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
             hls.recoverMediaError();
           } else {
@@ -151,18 +171,19 @@ const Player = (() => {
         }
       });
 
-    } else if ((live || url.includes('/api/transcode')) && typeof mpegts !== 'undefined' && mpegts.isSupported()) {
-      // mpegts.js for live MPEG-TS streams and FFmpeg transcode output
+    } else if ((live || url.includes('/api/transcode') || /\.ts($|\?|#)/.test(url)) && typeof mpegts !== 'undefined' && mpegts.isSupported()) {
+      // mpegts.js for live MPEG-TS streams, FFmpeg transcode output, and catch-up .ts VOD
       const isTranscode = url.includes('/api/transcode');
+      const isTsVod = !live && !isTranscode; // finite catch-up stream; no live-edge chasing
       const absUrl = url.startsWith('http') ? url : `${location.origin}${url}`;
-      console.log(`[player] Using mpegts.js for ${isTranscode ? 'transcoded' : 'live'} stream:`, absUrl);
+      console.log(`[player] Using mpegts.js for ${isTranscode ? 'transcoded' : isTsVod ? 'catch-up' : 'live'} stream:`, absUrl);
       mpegtsPlayer = mpegts.createPlayer({
         type: 'mpegts',
-        isLive: live || isTranscode, // transcode streams are continuous
+        isLive: !isTsVod, // transcode + live streams are continuous; catch-up is finite
         url: absUrl,
       }, {
         enableWorker: true,
-        liveBufferLatencyChasing: true,
+        liveBufferLatencyChasing: !isTsVod,
         liveBufferLatencyMaxLatency: 8,
         liveBufferLatencyMinRemain: 2,
         stashInitialSize: 1024 * 1024,
@@ -182,14 +203,19 @@ const Player = (() => {
       mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
         console.warn('[player] mpegts error:', errorType, errorDetail, errorInfo?.msg);
         if (onErrorCb && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
-          onErrorCb('Network error. Retrying...');
-          setTimeout(() => {
-            if (mpegtsPlayer) {
-              mpegtsPlayer.unload();
-              mpegtsPlayer.load();
-              startPlay();
-            }
-          }, 2000);
+          if (networkRetries < MAX_NETWORK_RETRIES) {
+            networkRetries++;
+            onErrorCb('Network error. Retrying...');
+            setTimeout(() => {
+              if (mpegtsPlayer) {
+                mpegtsPlayer.unload();
+                mpegtsPlayer.load();
+                startPlay();
+              }
+            }, 2000);
+          } else {
+            onErrorCb('Network error. Stream may be unavailable.');
+          }
         } else if (onErrorCb && errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
           onErrorCb('Media error: ' + (errorInfo?.msg || errorDetail));
         }
@@ -205,11 +231,6 @@ const Player = (() => {
       // Direct video (MP4, MKV via /api/stream proxy)
       console.log('[player] Using native video element');
       video.src = url;
-      video.addEventListener('error', () => {
-        const err = video.error;
-        console.warn('[player] Video error:', err?.code, err?.message);
-        if (onErrorCb) onErrorCb('Playback error. Stream may be unavailable.');
-      }, { once: true });
       startPlay();
     }
   }

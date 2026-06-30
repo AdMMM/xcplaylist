@@ -151,12 +151,13 @@
     </div>
   </div>
 
-  <!-- HLS.js (open source, BSD license) - for H.264 HLS streams -->
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.17/dist/hls.min.js"></script>
-  <!-- mpegts.js (open source, Apache-2.0) - for HEVC/H.265 MPEG-TS streams -->
-  <script src="https://cdn.jsdelivr.net/npm/mpegts.js@1.7.3/dist/mpegts.js"></script>
+  <!-- HLS.js (BSD) + mpegts.js (Apache-2.0) vendored locally (js/vendor/) so the
+       desktop app needs no live CDN at runtime and works fully offline. -->
+  <script src="/js/vendor/hls.min.js"></script>
+  <script src="/js/vendor/mpegts.js"></script>
   <script src="/js/api.js"></script>
   <script src="/js/player.js"></script>
+  <script src="/js/parse-time.js"></script>
   <script src="/js/epg.js"></script>
   <script src="/js/guide.js"></script>
   <script src="/js/app.js"></script>

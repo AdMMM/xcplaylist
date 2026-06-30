@@ -67,20 +67,9 @@ const EPG = (() => {
   }
 
   // ===== Time parsing =====
-
-  function parseTime(str) {
-    if (!str) return null;
-    // Format: "20250308120000 +0000"  or  "2025-03-08T12:00:00"
-    const clean = str.replace(/\s.*$/, '');
-    if (clean.length === 14 && /^\d{14}$/.test(clean)) {
-      const y = clean.slice(0, 4), m = clean.slice(4, 6), d = clean.slice(6, 8);
-      const h = clean.slice(8, 10), mi = clean.slice(10, 12), s = clean.slice(12, 14);
-      const date = new Date(`${y}-${m}-${d}T${h}:${mi}:${s}Z`);
-      return isNaN(date) ? null : date;
-    }
-    const date = new Date(str);
-    return isNaN(date) ? null : date;
-  }
+  // parseTime lives in js/parse-time.js (loaded as a global before this file)
+  // so it can be unit-tested under node:test.
+  const parseTime = (typeof window !== 'undefined' && window.parseTime) || globalThis.parseTime;
 
   function formatTime(date) {
     if (!date || isNaN(date)) return '';
