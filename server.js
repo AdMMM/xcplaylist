@@ -1,7 +1,7 @@
 const express = require('express');
 const http = require('http');
 const https = require('https');
-const { spawn, execFileSync } = require('child_process');
+const { spawn, execFileSync, execFile } = require('child_process');
 const { XMLParser } = require('fast-xml-parser');
 const path = require('path');
 const fs = require('fs');
@@ -458,23 +458,35 @@ app.get('/api/transcode', (req, res) => {
   try { parsed = assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
 
   const shortPath = parsed.pathname.split('/').pop();
-  console.log(`[transcode] Starting: ${shortPath}`);
+  // VOD/series are finite files — without -re ffmpeg races through them at
+  // download speed (playback "flies along"). Live sources already pace
+  // themselves, so -re there would just add latency.
+  const isLiveSrc = /\/live\//.test(parsed.pathname);
+  console.log(`[transcode] Starting: ${shortPath}${isLiveSrc ? '' : ' (paced)'}`);
 
-  // Spawn FFmpeg: read from URL, copy video, transcode audio to AAC stereo
-  // -re: read at native rate (avoids overwhelming the buffer for live streams)
+  // Spawn FFmpeg: read from URL, transcode audio to AAC stereo, video either
+  // passed through untouched (default, zero quality loss) or re-encoded to H.264.
+  // -re: read at native rate (VOD/series only — avoids racing through the file)
   // -c:v copy: pass video through untouched (no re-encoding = zero quality loss)
+  // -c:v libx264 (vcodec=h264): re-encode video — for codecs the browser can't
+  //   decode (e.g. MPEG-2, HEVC). Triggered when in-app playback shows no frames.
   // -c:a aac: transcode audio to AAC (universally supported by browsers)
   // -ac 2: downmix to stereo (5.1 → 2.0)
   // -b:a 192k: good quality AAC bitrate
   // -f mpegts: output as MPEG-TS (streamable, works with mpegts.js and HLS.js)
+  const reencodeVideo = req.query.vcodec === 'h264';
+  const videoArgs = reencodeVideo
+    ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
+    : ['-c:v', 'copy'];
   const ffArgs = [
     '-hide_banner', '-loglevel', 'warning',
+    ...(isLiveSrc ? [] : ['-re']),
     '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
     // Restrict input protocols so a crafted URL can't coax ffmpeg into
     // file:/concat:/etc. (assertProxyTarget already enforces http/https above).
     '-protocol_whitelist', 'http,https,tcp,tls,crypto',
     '-i', target,
-    '-c:v', 'copy',
+    ...videoArgs,
     '-c:a', 'aac',
     '-ac', '2',
     '-b:a', '192k',
@@ -542,6 +554,90 @@ app.get('/api/transcode/check', (req, res) => {
   res.json({ available: !!ffmpegPath });
 });
 
+// Probe a stream's runtime (seconds) by reading ffmpeg's header output. Lets the
+// HLS seekable transcode work for titles whose Xtream metadata has no duration
+// (e.g. series episodes). Returns 0 if unknown — caller falls back to the pipe.
+app.get('/api/duration', (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).json({ error: 'Missing url' });
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).json({ error: e.message }); }
+  if (!ffmpegPath) return res.json({ seconds: 0 });
+
+  let err = '';
+  const ff = spawn(ffmpegPath, [
+    '-hide_banner', '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
+    '-protocol_whitelist', 'http,https,tcp,tls,crypto', '-i', target,
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  const kill = setTimeout(() => { try { ff.kill('SIGKILL'); } catch {} }, 12000);
+  ff.stderr.on('data', (d) => { err += d.toString(); });
+  ff.on('error', () => { clearTimeout(kill); if (!res.headersSent) res.json({ seconds: 0 }); });
+  ff.on('close', () => {
+    clearTimeout(kill);
+    const m = err.match(/Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)/);
+    const secs = m ? (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3]) : 0;
+    if (!res.headersSent) res.json({ seconds: Math.round(secs) });
+  });
+});
+
+// Hand a stream to a native external player (VLC/IINA/mpv) — the escape hatch
+// for codecs the browser can't decode at all (e.g. HEVC video). Native players
+// decode everything, so this is the robust fallback our web stack can't cover.
+app.get('/api/open-external', (req, res) => {
+  const target = req.query.url;
+  if (!target) return res.status(400).send('Missing url');
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+
+  if (process.platform === 'darwin') {
+    const apps = ['VLC', 'IINA', 'mpv'];
+    const tryApp = (i) => {
+      if (i >= apps.length) return res.status(404).json({ error: 'No external player found (install VLC)' });
+      execFile('open', ['-a', apps[i], target], (err) => err ? tryApp(i + 1) : res.json({ ok: true, player: apps[i] }));
+    };
+    tryApp(0);
+  } else if (process.platform === 'win32') {
+    const paths = ['C:\\Program Files\\VideoLAN\\VLC\\vlc.exe', 'C:\\Program Files (x86)\\VideoLAN\\VLC\\vlc.exe'];
+    const tryPath = (i) => {
+      if (i >= paths.length) return res.status(404).json({ error: 'VLC not found' });
+      execFile(paths[i], [target], (err) => err ? tryPath(i + 1) : res.json({ ok: true, player: 'VLC' }));
+    };
+    tryPath(0);
+  } else {
+    execFile('vlc', [target], (err) => err ? res.status(404).json({ error: 'VLC not found' }) : res.json({ ok: true, player: 'VLC' }));
+  }
+});
+
+// ---------- Seekable on-the-fly HLS transcode for VOD/series ----------
+// lib/hls-transcode.js: complete VOD playlist up front + one rolling ffmpeg
+// (re-encode video, forced keyframes, audio AAC) + kill/restart-with-ss on a
+// seek outside the produced window. Working seek/duration/resume, no stutter,
+// and undecodable video (HEVC) also plays in-app.
+const hls = require('./lib/hls-transcode');
+hls.setFfmpegPath(ffmpegPath);
+
+app.get('/api/hls/playlist.m3u8', (req, res) => {
+  const target = req.query.url;
+  const total = parseFloat(req.query.dur) || 0;
+  if (!target || total <= 0) return res.status(400).send('Missing url/dur');
+  try { assertProxyTarget(target); } catch (e) { return res.status(e.statusCode || 400).send(e.message); }
+  if (!ffmpegPath) return res.status(501).json({ error: 'FFmpeg not available' });
+
+  hls.ensureSession(target, total);
+  const { playlist } = hls.buildPlaylist(hls.keyFor(target), total);
+  res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.send(playlist);
+});
+
+app.get('/api/hls/seg.ts', async (req, res) => {
+  const key = req.query.key;
+  const n = parseInt(req.query.n, 10);
+  if (!key || Number.isNaN(n)) return res.status(400).send('Missing key/n');
+  const file = await hls.getSegmentFile(key, n);
+  if (!file) return res.status(404).send('Segment unavailable');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.sendFile(file, { headers: { 'Content-Type': 'video/mp2t' } });
+});
+
 // Catch-all for SPA
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
@@ -569,6 +665,7 @@ function shutdown() {
     } catch {}
   }
   activeTranscodes.clear();
+  hls.shutdown(); // kill HLS transcode sessions + remove their temp dirs
   // Close the Express server
   server.close(() => {
     console.log('[server] Express server closed');

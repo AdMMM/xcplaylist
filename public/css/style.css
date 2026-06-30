@@ -337,16 +337,29 @@ html, body {
 }
 .card:hover { transform: translateY(-2px); border-color: var(--accent); }
 
-.card-img {
+/* Logo plate: always holds its 16/9 shape so a missing/broken logo leaves a clean
+   empty tile (never collapses, never clips a fallback name). Muted light-gray —
+   channel logos are transparent PNGs drawn for a white bg, so dark text/wordmarks
+   (Channel 5, Comedy Central) stay legible — but kept soft, not stark white. */
+.card-thumb {
   width: 100%;
   aspect-ratio: 16/9;
-  object-fit: contain;   /* channel logos vary in size — show the whole logo, don't crop */
-  background: #1a1a2e;
-  display: block;
+  background: #aab0bd;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 8px;
+  overflow: hidden;
 }
-/* VOD/series posters fill their 2:3 tile */
-.card-img.poster { aspect-ratio: 2/3; object-fit: cover; padding: 0; }
+.card-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;   /* channel logos vary in size — show the whole logo, don't crop */
+  display: block;
+}
+/* VOD/series posters fill their 2:3 tile on a dark placeholder while artwork loads */
+.card-thumb.poster { aspect-ratio: 2/3; padding: 0; background: #1a1a2e; }
+.card-thumb.poster .card-img { width: 100%; height: 100%; object-fit: cover; }
 
 .card-body { padding: 10px; }
 .card-title {
@@ -405,6 +418,7 @@ html, body {
 #player-overlay.hidden { display: none !important; }
 
 #player-header {
+  position: relative;
   height: 48px;
   display: flex;
   align-items: center;
@@ -418,15 +432,22 @@ html, body {
 #player-header button {
   -webkit-app-region: no-drag;
 }
+/* Title centered in the window; buttons pinned to the right via margin-left:auto below */
 #player-title {
-  flex: 1;
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  max-width: 55%;
+  text-align: center;
   font-size: 15px;
   font-weight: 500;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  pointer-events: none;
 }
-#player-fav { font-size: 22px; }
+#player-fav { font-size: 22px; margin-left: auto; }
 
 #player-container {
   flex: 1;

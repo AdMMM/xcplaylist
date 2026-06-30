@@ -26,6 +26,8 @@ const App = (() => {
   // Audio health check
   let audioCheckInterval = null;
   let audioAutoSwitched = false;
+  let videoAutoSwitched = false;
+  let videoFallbackOffered = false;
   // FFmpeg transcode availability
   let transcodeAvailable = false;
 
@@ -80,7 +82,7 @@ const App = (() => {
   const toastTextEl = $('toast-text');
 
   // ===== Init =====
-  function init() {
+  async function init() {
     // Detect platform for CSS overrides (macOS traffic light padding, etc.)
     if (navigator.platform && navigator.platform.startsWith('Win')) {
       document.body.classList.add('platform-win');
@@ -94,6 +96,18 @@ const App = (() => {
     loadReminders();
     loadFormatMemory();
     localStorage.removeItem('xc_empty_series'); // clear tiles wrongly hidden by the dropped removal feature
+    // Logo fallback: on a broken provider logo, swap to the bundled local logo
+    // (matched by channel name) if one exists, else hide so the plate stays clean.
+    window.__logoFallback = (img) => {
+      const local = img.getAttribute('data-local');
+      if (local && !img.src.endsWith(local)) {
+        img.removeAttribute('data-local');
+        img.src = local;
+      } else {
+        img.style.display = 'none';
+      }
+    };
+    await XC.loadLogoIndex(); // bundled channel-logo pack — ready before first render
     bindEvents();
     tryAutoLogin();
     // Check if server has FFmpeg for audio transcoding
@@ -153,6 +167,7 @@ const App = (() => {
     $('ctrl-mute').addEventListener('click', () => { Player.toggleMute(); updateMuteBtn(); });
     $('ctrl-fullscreen').addEventListener('click', Player.toggleFullscreen);
     $('ctrl-pip').addEventListener('click', Player.togglePiP);
+    $('ctrl-external').addEventListener('click', openCurrentExternal);
     $('volume-slider').addEventListener('input', (e) => Player.setVolume(parseFloat(e.target.value)));
     $('player-fav').addEventListener('click', toggleCurrentFavorite);
     $('ctrl-format').addEventListener('click', cycleFormat);
@@ -470,8 +485,12 @@ const App = (() => {
       card.className = 'card';
 
       const isPoster = currentSection === 'vod' || currentSection === 'series';
-      const imgSrc = item.stream_icon || item.cover || '';
       const name = item.name || item.title || '';
+      const provided = item.stream_icon || item.cover || '';
+      // Channel logos fall back to the bundled pack when the provider's URL is
+      // missing or its host is dead/blocked; posters use their own artwork only.
+      const local = isPoster ? '' : XC.localLogo(name);
+      const imgSrc = provided || local;
 
       let sub = '';
       if (currentSection === 'live') {
@@ -484,7 +503,9 @@ const App = (() => {
       }
 
       card.innerHTML = `
-        ${imgSrc ? `<img class="card-img${isPoster ? ' poster' : ''}" src="${escHtml(imgSrc)}" alt="" loading="lazy" onerror="this.style.display='none'">` : `<div class="card-img${isPoster ? ' poster' : ''}" style="display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--text-dim)">${escHtml(name.slice(0, 30))}</div>`}
+        <div class="card-thumb${isPoster ? ' poster' : ''}">
+          ${imgSrc ? `<img class="card-img" src="${escHtml(imgSrc)}" data-local="${escHtml(local)}" alt="" loading="lazy" onerror="window.__logoFallback(this)">` : ''}
+        </div>
         ${currentSection === 'live' ? '<span class="card-live">LIVE</span>' : ''}
         <div class="card-body">
           <div class="card-title" title="${escHtml(name)}">${escHtml(name)}</div>
@@ -591,7 +612,7 @@ const App = (() => {
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(item.stream_id, 'live');
+      url = await transcodeSourceUrl(item.stream_id, 'live', item, { forceVideo: getRememberedVideoFix(String(item.stream_id)) });
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -621,12 +642,13 @@ const App = (() => {
     const remembered = getRememberedFormat(String(item.stream_id));
     const title = item.name || item.title;
     currentPlayingItem = { type: 'vod', item };
+    ensureDuration(item, 'vod'); // probe runtime so audio-fix can use seekable HLS
 
     let url;
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(item.stream_id, 'vod');
+      url = await transcodeSourceUrl(item.stream_id, 'vod', item, { forceVideo: getRememberedVideoFix(String(item.stream_id)) });
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -652,12 +674,13 @@ const App = (() => {
     const remembered = getRememberedFormat(String(episode.id));
     const title = `${seriesName} - ${episode.title || `Episode ${episode.episode_num}`}`;
     currentPlayingItem = { type: 'series', item: episode };
+    ensureDuration(episode, 'series'); // probe runtime so audio-fix can use seekable HLS
 
     let url;
     currentFormatIndex = 0;
 
     if (remembered === 'transcode' && transcodeAvailable) {
-      url = XC.transcodeUrl(episode.id, 'series');
+      url = await transcodeSourceUrl(episode.id, 'series', episode, { forceVideo: getRememberedVideoFix(String(episode.id)) });
       const cycle = getFormatCycle();
       const idx = cycle.indexOf('transcode');
       if (idx >= 0) currentFormatIndex = idx;
@@ -744,13 +767,20 @@ const App = (() => {
     if (Player.isLive) return;
     const dur = Player.duration();
     const cur = Player.currentTime();
-    if (!dur || isNaN(dur)) return;
+    // Unknown length (transcoded stream plays as a live feed → duration is
+    // Infinity) — show elapsed only, no bogus total.
+    if (!isFinite(dur) || dur <= 0) {
+      $('progress-fill').style.width = '0%';
+      $('time-display').textContent = fmtTime(cur);
+      return;
+    }
     const pct = (cur / dur) * 100;
     $('progress-fill').style.width = pct + '%';
     $('time-display').textContent = `${fmtTime(cur)} / ${fmtTime(dur)}`;
   }
 
   function fmtTime(s) {
+    if (!isFinite(s) || s < 0) return '0:00';
     const h = Math.floor(s / 3600);
     const m = Math.floor((s % 3600) / 60);
     const sec = Math.floor(s % 60);
@@ -797,6 +827,63 @@ const App = (() => {
     return labels[fmt] || fmt.toUpperCase();
   }
 
+  // Best-effort runtime (seconds) for a VOD item / series episode.
+  function itemDurationSecs(item) {
+    if (!item) return 0;
+    if (Number(item._durationSecs) > 0) return Number(item._durationSecs); // probed
+    const info = item.info || {};
+    if (Number(info.duration_secs) > 0) return Number(info.duration_secs);
+    if (typeof info.duration === 'string') {
+      const m = info.duration.match(/(\d+):(\d{2}):(\d{2})/);
+      if (m) { const t = (+m[1]) * 3600 + (+m[2]) * 60 + (+m[3]); if (t > 0) return t; }
+    }
+    const ert = parseInt(item.episode_run_time, 10);
+    return ert > 0 ? ert * 60 : 0;
+  }
+
+  // Transcode source: prefer the SEEKABLE HLS remux for VOD/series. Awaits the
+  // runtime probe so HLS engages even when metadata has no duration (series);
+  // only falls back to the live MPEG-TS pipe if the runtime is truly unknown.
+  async function transcodeSourceUrl(streamId, type, item, opts = {}) {
+    const container = item && item.container_extension;
+    if (type !== 'live') {
+      await ensureDuration(item, type);
+      // The HLS transcode already re-encodes video to H.264, so it covers
+      // forceVideo (MPEG-2/HEVC) too.
+      const hls = XC.hlsTranscodeUrl(streamId, type, container, itemDurationSecs(item));
+      if (hls) return hls;
+    }
+    // Live (or duration-less fallback): re-encode video only when asked (a codec
+    // the browser can't decode), otherwise copy video for zero quality loss.
+    return XC.transcodeUrl(streamId, type, container, opts.forceVideo ? { vcodec: 'h264' } : undefined);
+  }
+
+  // Probe + cache the runtime so the seekable HLS transcode can be used even
+  // when Xtream metadata lacks a duration (e.g. series episodes). Fire-and-forget;
+  // if it doesn't return in time, transcode falls back to the live pipe.
+  async function ensureDuration(item, type) {
+    if (!item || type === 'live' || itemDurationSecs(item) > 0) return;
+    try {
+      const secs = await XC.probeDuration(String(item.stream_id || item.id), type, item.container_extension);
+      if (secs > 0) item._durationSecs = secs;
+    } catch { /* ignore — falls back to live pipe */ }
+  }
+
+  // Hand the current stream to a native external player (VLC/IINA/mpv) — the
+  // escape hatch for codecs the browser can't decode (e.g. HEVC video).
+  async function openCurrentExternal() {
+    if (!currentPlayingItem) return;
+    const it = currentPlayingItem.item;
+    const raw = XC.rawStreamUrl(String(it.stream_id || it.id), currentPlayingItem.type, it.container_extension);
+    if (!raw) return;
+    try {
+      const r = await XC.openExternal(raw);
+      showToast(`Opened in ${r.player || 'external player'}`);
+    } catch (e) {
+      showToast(e.message || 'No external player found — install VLC');
+    }
+  }
+
   async function cycleFormat() {
     if (!currentPlayingItem) return;
     const cycle = getFormatCycle();
@@ -833,7 +920,7 @@ const App = (() => {
     try {
       let url;
       if (fmt === 'transcode') {
-        url = XC.transcodeUrl(streamId, type);
+        url = await transcodeSourceUrl(streamId, type, item);
         if (!url) throw new Error('Cannot build transcode URL');
       } else {
         const resp = await XC.streamUrl(streamId, type, fmt);
@@ -867,14 +954,24 @@ const App = (() => {
     localStorage.setItem('xc_format_memory', JSON.stringify(formatMemory));
   }
 
-  function rememberFormat(streamId, format) {
-    formatMemory[streamId] = { fmt: format, ts: Date.now() };
+  function rememberFormat(streamId, format, opts) {
+    const prev = formatMemory[streamId] || {};
+    // vfix (video re-encode needed) is sticky: once a channel is known to need
+    // H.264 re-encode, keep that flag on later remembers (e.g. the audio path)
+    // unless explicitly set, so replays skip the detect-and-switch flip.
+    const vfix = opts && opts.vfix ? true : !!prev.vfix;
+    formatMemory[streamId] = { fmt: format, vfix, ts: Date.now() };
     saveFormatMemory();
   }
 
   function getRememberedFormat(streamId) {
     const entry = formatMemory[streamId];
     return entry ? entry.fmt : null;
+  }
+
+  function getRememberedVideoFix(streamId) {
+    const entry = formatMemory[streamId];
+    return !!(entry && entry.vfix);
   }
 
   // ===== Audio Auto-Detection =====
@@ -884,6 +981,8 @@ const App = (() => {
   function startAudioHealthCheck() {
     stopAudioHealthCheck();
     audioAutoSwitched = false;
+    videoAutoSwitched = false;
+    videoFallbackOffered = false;
     // Wait 3.5s for decoder to stabilise, then check every 2s
     audioCheckInterval = setTimeout(() => {
       audioCheckInterval = setInterval(checkAudioHealth, 2000);
@@ -897,8 +996,41 @@ const App = (() => {
     audioCheckInterval = null;
   }
 
-  function checkAudioHealth() {
-    if (!currentPlayingItem || audioAutoSwitched) return;
+  // Switch the current stream to a video-re-encoding transcode (H.264). Used when
+  // the browser can't decode the source video codec (MPEG-2 / HEVC).
+  async function switchToVideoTranscode() {
+    const item = currentPlayingItem.item;
+    const streamId = String(item.stream_id || item.id);
+    const type = currentPlayingItem.type;
+    videoAutoSwitched = true;
+    const cycle = getFormatCycle();
+    const transcodeIndex = cycle.indexOf('transcode');
+    if (transcodeIndex !== -1) currentFormatIndex = transcodeIndex;
+    rememberFormat(streamId, 'transcode', { vfix: true });
+    showFormatSwitch('Video codec unsupported — re-encoding to H.264…', 'Video Fix');
+    const url = await transcodeSourceUrl(streamId, type, item, { forceVideo: true });
+    if (url) {
+      Player.play(url, type === 'live');
+      resetIdle();
+    }
+  }
+
+  async function checkAudioHealth() {
+    if (!currentPlayingItem) return;
+
+    // No decoded video frames → the video codec can't be decoded in-app
+    // (e.g. MPEG-2 on some live channels, HEVC). Re-encode to H.264 via FFmpeg —
+    // works for live + VOD/series. VLC hint only if transcoding is unavailable.
+    if (!videoAutoSwitched && Player.getVideoHealth() === 'novideo') {
+      if (transcodeAvailable) {
+        await switchToVideoTranscode();
+        return;
+      } else if (!videoFallbackOffered) {
+        videoFallbackOffered = true;
+        showToast('Video codec not supported in-app — tap ↗ to open in VLC');
+      }
+    }
+    if (audioAutoSwitched) return;
 
     const health = Player.getAudioHealth();
     if (health !== 'silent') return; // 'ok' or 'unknown' — no action needed
@@ -927,7 +1059,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Audio fix — transcoding via FFmpeg...', 'AAC Fix');
 
-      const url = XC.transcodeUrl(streamId, type);
+      const url = await transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();
@@ -944,7 +1076,7 @@ const App = (() => {
       rememberFormat(streamId, 'transcode');
       showFormatSwitch('Unsupported audio — transcoding to AAC...', 'AAC Fix');
 
-      const url = XC.transcodeUrl(streamId, type);
+      const url = await transcodeSourceUrl(streamId, type, item);
       if (url) {
         Player.play(url, type === 'live');
         resetIdle();
