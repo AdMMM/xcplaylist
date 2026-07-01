@@ -28,6 +28,7 @@ const App = (() => {
   let audioAutoSwitched = false;
   let videoAutoSwitched = false;
   let videoFallbackOffered = false;
+  let playerStatusTimer = null; // auto-dismiss timer for the player status banner
   // FFmpeg transcode availability
   let transcodeAvailable = false;
 
@@ -199,9 +200,20 @@ const App = (() => {
       Player.seek(pct * Player.duration());
     });
 
-    // Player error — overwrite (don't append) so messages don't accumulate.
-    Player.onError((msg) => {
-      playerTitle.textContent = basePlayerTitle + (msg ? ` - ${msg}` : '');
+    // Player status/error → banner over the video. (msg, severity); msg null clears.
+    // Advisory (info/warn) messages auto-dismiss after 7s; hard errors persist
+    // until playback recovers or the user switches stream.
+    Player.onError((msg, severity) => {
+      const el = $('player-status');
+      if (!el) return;
+      clearTimeout(playerStatusTimer);
+      if (!msg) { el.classList.add('hidden'); el.textContent = ''; return; }
+      el.textContent = msg;
+      el.dataset.kind = severity || 'info';
+      el.classList.remove('hidden');
+      if (severity !== 'error') {
+        playerStatusTimer = setTimeout(() => el.classList.add('hidden'), 7000);
+      }
     });
 
     // Series close
@@ -726,6 +738,7 @@ const App = (() => {
 
     $('progress-bar').classList.toggle('hidden', live);
     $('time-display').textContent = '';
+    $('player-status').classList.add('hidden'); // clear any stall message from the previous stream
 
     Player.play(url, live);
 
