@@ -6,6 +6,7 @@ const Player = (() => {
   let isLive = false;
   let onErrorCb = null;
   let bufferingTimer = null;
+  let bufferingMsgTimer = null;
   let stalledRetries = 0;
   const MAX_STALL_RETRIES = 3;
   let networkRetries = 0;
@@ -19,6 +20,30 @@ const Player = (() => {
     video.addEventListener('stalled', onStalled);
     // Attached once here (not per play()) so error handlers don't accumulate.
     video.addEventListener('error', onVideoError);
+    // The player silently stopping (paused/ended without an error event) is its
+    // own failure mode — the source dropped and the user has to hit play again.
+    video.addEventListener('pause', onUnexpectedPause);
+    video.addEventListener('ended', onEnded);
+  }
+
+  let intentionalPause = false; // true when WE paused (user toggle / teardown / channel switch)
+
+  // Paused without the user asking → the stream dropped. Tell them + try to recover.
+  function onUnexpectedPause() {
+    if (intentionalPause || video.ended || !onErrorCb) return;
+    // readyState dropping to nothing means data stopped arriving, not a normal pause.
+    console.warn('[player] Unexpected pause — source may have dropped');
+    status('Playback stopped — the stream dropped. Reconnecting… (press play if it doesn\'t resume).', 'warn');
+    recoverPlayback();
+  }
+
+  function onEnded() {
+    if (!onErrorCb) return;
+    if (isLive) {
+      console.warn('[player] Live stream ended unexpectedly — reconnecting');
+      status('The channel stopped sending data — reconnecting…', 'warn');
+      seekToLiveEdge();
+    }
   }
 
   function onError(cb) { onErrorCb = cb; }
@@ -29,13 +54,26 @@ const Player = (() => {
     if (hls || mpegtsPlayer) return;
     const err = video && video.error;
     console.warn('[player] Video error:', err?.code, err?.message);
-    if (onErrorCb) onErrorCb('Playback error. Stream may be unavailable.');
+    const netCode = err && err.code === 2; // MEDIA_ERR_NETWORK
+    status(netCode
+      ? 'Network error fetching the stream — it may be unavailable.'
+      : 'Playback error — the stream may be unavailable or in an unsupported format.', 'error');
   }
+
+  // Status banner helper: (text, severity) — severity 'info'|'warn'|'error',
+  // or null to clear. App renders it over the video.
+  function status(text, severity) { if (onErrorCb) onErrorCb(text, severity); }
 
   // Show buffering state and auto-recover if stuck too long
   function onBuffering() {
     clearTimeout(bufferingTimer);
+    clearTimeout(bufferingMsgTimer);
     video.classList.add('buffering');
+    // If it's still buffering after ~2.5s (not a momentary blip), tell the user why.
+    bufferingMsgTimer = setTimeout(() => {
+      if (video.paused || !video.classList.contains('buffering')) return;
+      status('Buffering — the stream is arriving slowly (the provider or your connection).', 'info');
+    }, 2500);
     // If stuck buffering for 8s, try to recover
     bufferingTimer = setTimeout(() => {
       if (video.paused || !video.classList.contains('buffering')) return;
@@ -46,9 +84,11 @@ const Player = (() => {
 
   function onPlaying() {
     clearTimeout(bufferingTimer);
+    clearTimeout(bufferingMsgTimer);
     video.classList.remove('buffering');
     stalledRetries = 0;
     networkRetries = 0;
+    status(null); // recovered — clear any stall message
   }
 
   function onStalled() {
@@ -63,7 +103,7 @@ const Player = (() => {
   function recoverPlayback() {
     if (stalledRetries >= MAX_STALL_RETRIES) {
       console.warn('[player] Max stall retries reached');
-      if (onErrorCb) onErrorCb('Stream buffering. Check your connection.');
+      status('Still stalled after several retries — the source may have dropped, or your connection is too slow.', 'error');
       stalledRetries = 0;
       return;
     }
@@ -92,7 +132,9 @@ const Player = (() => {
   }
 
   function destroy() {
+    intentionalPause = true; // teardown pauses the element — don't flag it as a drop
     clearTimeout(bufferingTimer);
+    clearTimeout(bufferingMsgTimer);
     stalledRetries = 0;
     networkRetries = 0;
     pausedAt = 0;
@@ -125,6 +167,7 @@ const Player = (() => {
   function play(url, live = false) {
     isLive = live;
     destroy();
+    intentionalPause = false; // fresh stream — a pause now is a real drop
     resetAudioCheck();
 
     // Check m3u8 FIRST so format cycling to HLS works even for live streams
@@ -157,16 +200,25 @@ const Player = (() => {
         console.warn('[player] HLS error:', data.type, data.details, data.reason);
         if (data.fatal) {
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            // If the provider responded with an HTTP error, surface the code —
+            // that's a server/channel-side problem, not the local connection.
+            const code = data.response && data.response.code;
             if (networkRetries < MAX_NETWORK_RETRIES) {
               networkRetries++;
+              status(code
+                ? `Provider returned HTTP ${code} for this stream — retrying… (the channel may be down).`
+                : 'Network problem reaching the stream — retrying…', 'warn');
               setTimeout(() => hls && hls.startLoad(), 1000);
-            } else if (onErrorCb) {
-              onErrorCb('Playback error. Stream may be unavailable.');
+            } else {
+              status(code
+                ? `Stream unavailable — provider keeps returning HTTP ${code}. The channel is likely down.`
+                : 'Stream unavailable — can\'t reach the provider (check your connection or the channel may be down).', 'error');
             }
           } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            status('Decoding problem — attempting to recover…', 'info');
             hls.recoverMediaError();
           } else {
-            if (onErrorCb) onErrorCb('Playback error. Stream may be unavailable.');
+            status('Playback failed — the stream may be unavailable.', 'error');
           }
         }
       });
@@ -202,10 +254,13 @@ const Player = (() => {
 
       mpegtsPlayer.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
         console.warn('[player] mpegts error:', errorType, errorDetail, errorInfo?.msg);
-        if (onErrorCb && errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
+        const code = errorInfo && errorInfo.code; // HTTP status when the provider replied with one
+        if (errorType === mpegts.ErrorTypes.NETWORK_ERROR) {
           if (networkRetries < MAX_NETWORK_RETRIES) {
             networkRetries++;
-            onErrorCb('Network error. Retrying...');
+            status(code
+              ? `Provider returned HTTP ${code} for this channel — retrying… (it may be down).`
+              : 'Network problem reaching the channel — retrying…', 'warn');
             setTimeout(() => {
               if (mpegtsPlayer) {
                 mpegtsPlayer.unload();
@@ -214,10 +269,12 @@ const Player = (() => {
               }
             }, 2000);
           } else {
-            onErrorCb('Network error. Stream may be unavailable.');
+            status(code
+              ? `Channel unavailable — provider keeps returning HTTP ${code}. It's likely down.`
+              : 'Channel unavailable — can\'t reach the provider (check your connection or it may be down).', 'error');
           }
-        } else if (onErrorCb && errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
-          onErrorCb('Media error: ' + (errorInfo?.msg || errorDetail));
+        } else if (errorType === mpegts.ErrorTypes.MEDIA_ERROR) {
+          status('Stream format problem — ' + (errorInfo?.msg || errorDetail) + '.', 'error');
         }
       });
 
@@ -240,6 +297,7 @@ const Player = (() => {
   function togglePlay() {
     if (video.paused) {
       // ── Unpause ──
+      intentionalPause = false;
       if (isLive && pausedAt) {
         const pausedFor = (Date.now() - pausedAt) / 1000;
         pausedAt = 0;
@@ -254,6 +312,7 @@ const Player = (() => {
       video.play().catch(() => {});
     } else {
       // ── Pause ──
+      intentionalPause = true;
       if (isLive) {
         pausedAt = Date.now();
         // Stop fetching to save bandwidth while paused
