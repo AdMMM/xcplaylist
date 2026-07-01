@@ -288,9 +288,16 @@ app.post('/api/stream/url', (req, res) => {
 
   const ext = type === 'live' ? (container || 'ts') : (container || 'mp4');
   const rawUrl = `${base}/${segment}/${user}/${pass}/${stream_id}.${ext}`;
-  // HLS manifests need /api/proxy for URL rewriting; everything else uses /api/stream
-  const proxy = ext === 'm3u8' ? '/api/proxy' : '/api/stream';
-  res.json({ url: `${proxy}?url=${encodeURIComponent(rawUrl)}` });
+  // HLS manifests need /api/proxy for URL rewriting.
+  // Live MPEG-TS goes through a copy-remux (mode=remux) so ffmpeg's auto-reconnect
+  // keeps it continuous — this provider's live edge drops the connection every
+  // ~20-40s, which otherwise ends playback (the "plays a chunk then stops" bug).
+  // Everything else (VOD/series direct) uses the plain /api/stream proxy.
+  let url;
+  if (ext === 'm3u8') url = `/api/proxy?url=${encodeURIComponent(rawUrl)}`;
+  else if (type === 'live') url = `/api/transcode?url=${encodeURIComponent(rawUrl)}&mode=remux`;
+  else url = `/api/stream?url=${encodeURIComponent(rawUrl)}`;
+  res.json({ url });
 });
 
 // Catch-up / timeshift stream URL builder
@@ -475,21 +482,33 @@ app.get('/api/transcode', (req, res) => {
   // -b:a 192k: good quality AAC bitrate
   // -f mpegts: output as MPEG-TS (streamable, works with mpegts.js and HLS.js)
   const reencodeVideo = req.query.vcodec === 'h264';
+  // mode=remux: copy BOTH streams (default live path — cheap, zero quality loss,
+  // just adds reconnect resilience). Otherwise transcode audio to AAC (audio-fix).
+  const remux = req.query.mode === 'remux';
   const videoArgs = reencodeVideo
     ? ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23', '-pix_fmt', 'yuv420p']
     : ['-c:v', 'copy'];
+  const audioArgs = remux
+    ? ['-c:a', 'copy']
+    : ['-c:a', 'aac', '-ac', '2', '-b:a', '192k'];
+  // Live edges on this provider drop the TCP connection every ~20-40s. Reconnect
+  // on EOF/stream-end so ffmpeg re-opens the source and output stays continuous
+  // (no reconnect for finite VOD — reconnect_at_eof would loop the file).
+  const reconnect = isLiveSrc
+    ? ['-reconnect', '1', '-reconnect_at_eof', '1', '-reconnect_streamed', '1', '-reconnect_delay_max', '4']
+    : [];
   const ffArgs = [
     '-hide_banner', '-loglevel', 'warning',
+    ...reconnect,
     ...(isLiveSrc ? [] : ['-re']),
     '-user_agent', 'VLC/3.0.20 LibVLC/3.0.20',
     // Restrict input protocols so a crafted URL can't coax ffmpeg into
     // file:/concat:/etc. (assertProxyTarget already enforces http/https above).
     '-protocol_whitelist', 'http,https,tcp,tls,crypto',
+    '-fflags', '+discardcorrupt', // drop the corrupt packet at each reconnect seam
     '-i', target,
     ...videoArgs,
-    '-c:a', 'aac',
-    '-ac', '2',
-    '-b:a', '192k',
+    ...audioArgs,
     '-f', 'mpegts',
     'pipe:1',
   ];
